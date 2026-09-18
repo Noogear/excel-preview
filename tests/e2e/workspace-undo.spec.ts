@@ -39,17 +39,40 @@ async function fillWorkspace(page: Page, a1: string): Promise<number> {
  * 轮询不影响"到底撤没撤对"的判定，又能把等待压到刚好够 —— 测试反而更准也更快。
  */
 async function expectItems(page: Page, expected: number, message: string): Promise<void> {
-  await expect.poll(() => items(page), { timeout: 8_000, message }).toBe(expected);
+  await expect.poll(() => items(page), { timeout: 10_000, message }).toBe(expected);
+}
+
+/**
+ * 按一次撤销/重做，并等应用**真的处理完**这一次按键。
+ *
+ * 为什么不能只 `press` 完睡一会（并发跑时实测偶发假红："重做第一步"拿到 0）：
+ * 快捷键是同步分发的，但**这一步的动作是异步的**（Univer 的 undo/redo 是异步命令，
+ * 工作区回放也依赖 React 提交）。账本每处理完一步都会记 `history:undo-*` / `history:redo-*`，
+ * 所以"等日志出现新的一条"就是"这一步真的落地了"的准确信号；到了边界（没得撤）时不会有新日志，
+ * 这种情况给 4 秒后放行（由调用方的断言去判断对错）。
+ */
+async function pressAndWait(page: Page, key: 'Control+z' | 'Control+y'): Promise<void> {
+  const before = (await readLog(page)).filter((entry) => /^history:(undo|redo)/.test(entry.kind)).length;
+  await page.keyboard.press(key);
+  await page
+    .waitForFunction(
+      (count: number) =>
+        (window as never as { __p0: { log: Array<{ kind: string }> } }).__p0.log.filter((entry) =>
+          /^history:(undo|redo)/.test(entry.kind),
+        ).length > count,
+      before,
+      { timeout: 4_000 },
+    )
+    .catch(() => undefined);
+  await page.waitForTimeout(80);
 }
 
 /** 焦点在 body 上时按 Ctrl+Z（模拟"点了工作区之后"） */
 async function pressUndo(page: Page): Promise<void> {
-  await page.keyboard.press('Control+z');
-  await page.waitForTimeout(300);
+  await pressAndWait(page, 'Control+z');
 }
 async function pressRedo(page: Page): Promise<void> {
-  await page.keyboard.press('Control+y');
-  await page.waitForTimeout(300);
+  await pressAndWait(page, 'Control+y');
 }
 
 test.describe('工作区动作可撤销/重做', () => {

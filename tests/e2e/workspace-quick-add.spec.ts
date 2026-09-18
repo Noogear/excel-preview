@@ -9,7 +9,8 @@
  *  ④ 同一次选区连点两下 → 只加一次；
  *  ⑤ 点到"看起来像空白"的交互元素（搜索框、按钮、条目）→ 不触发；
  *  ⑥ 拖到面板里松手（不是点击）→ 不触发；
- *  ⑦ 拖拽模式 / 点击互换模式下点空白 → 不触发（免得和那两种模式的手势打架）；
+ *  ⑦ 拖拽模式下点空白 → 不触发（那一模式的手势语言就是"按住拖"）；
+ *     点击互换模式下**要触发**（用户后补的要求："点击交换模式也把这个功能加上去"）；
  *  ⑧ 撤销：Ctrl+Z 能把这次加入撤掉。
  */
 import { expect, test, type Page } from '@playwright/test';
@@ -169,7 +170,7 @@ test.describe('工作区快速加入：选中后点空白就收进来', () => {
     expect(await items(page), '点这些交互元素都不该改变条目数').toHaveLength(1);
   });
 
-  test('⑥ 拖到面板里松手（不是点击）不触发；⑦ 拖拽/点击互换模式点空白也不触发', async ({ page }) => {
+  test('⑥ 拖到面板里松手走拖拽（不被记成快速加入）；⑦ 点击互换模式也能快速加入，拖拽模式不动手', async ({ page }) => {
     test.setTimeout(120_000);
 
     // ⑥ 从表格拖一片到面板空白：这是"拖入工作区"的正常路径，走的是拖拽而不是快速加入
@@ -187,17 +188,25 @@ test.describe('工作区快速加入：选中后点空白就收进来', () => {
     expect(afterDrag.length, '拖拽入工作区照旧生效').toBeGreaterThan(0);
     expect(await logKinds(page), '这一次不该被记成"快速加入"').not.toContain('workspace:quick-add');
 
-    // ⑦ 换成拖拽模式 / 点击互换模式：选中后点空白不动手
-    for (const mode of ['drag', 'click-swap'] as const) {
-      await page.evaluate(() => (window as never as { __p0: { clearWorkspace: () => void } }).__p0.clearWorkspace());
-      await page.waitForTimeout(200);
-      await switchMode(page, mode);
-      await clickCell(page, 'A2');
-      const point = await blankPoint(page);
-      await page.mouse.click(point.x, point.y);
-      await page.waitForTimeout(300);
-      expect(await items(page), `${mode} 模式下点空白不该加入`).toHaveLength(0);
-      expect(await logKinds(page), '应记录因模式跳过').toContain('workspace:quick-add-skipped');
-    }
+    // ⑦ 拖拽模式下点空白：不做任何事（该模式的手势语言是"按住拖"）
+    await page.evaluate(() => (window as never as { __p0: { clearWorkspace: () => void } }).__p0.clearWorkspace());
+    await page.waitForTimeout(200);
+    await clickCell(page, 'A2');
+    const dragBlank = await blankPoint(page);
+    await page.mouse.click(dragBlank.x, dragBlank.y);
+    await page.waitForTimeout(300);
+    expect(await items(page), '拖拽模式下点空白不该加入').toHaveLength(0);
+    expect(await logKinds(page), '应记录因模式跳过').toContain('workspace:quick-add-skipped');
+
+    // ⑧ 点击互换模式：用户要求"也把这个功能加上去" → 选中后点空白要加入
+    await switchMode(page, 'click-swap');
+    await clickCell(page, 'A2');
+    const swapBlank = await blankPoint(page);
+    await page.mouse.click(swapBlank.x, swapBlank.y);
+    await page.waitForTimeout(400);
+    const inSwapMode = await items(page);
+    expect(inSwapMode.length, '点击互换模式下点空白应加入').toBeGreaterThan(0);
+    expect(inSwapMode[0].a1, '来源就是刚选中的格子').toBe('A2');
+    expect(await logKinds(page), '应记录快速加入').toContain('workspace:quick-add');
   });
 });

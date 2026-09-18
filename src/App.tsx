@@ -151,6 +151,14 @@ const MOVE_TOLERANCE_PX = 8;
  * 3 秒是"刚选完"的直觉窗口：超时后再点空白就不动手（避免用户只是随手点一下就莫名多出条目）。
  */
 const QUICK_ADD_WINDOW_MS = 3000;
+/**
+ * 哪些交互模式支持这条捷径。
+ *
+ * 用户先要求"选择模式下…"，随后又要求"点击交换模式也把这个功能加上去"。
+ * **拖拽模式刻意不参与**：那个模式的手势语言就是"按住拖"，在它下面点空白容易被理解成
+ * "放下/取消"，少一个隐式动作更不容易误触（真要加入就切到选择模式，或直接把选区拖进工作区）。
+ */
+const QUICK_ADD_MODES: readonly InteractionMode[] = ['select', 'click-swap'];
 /** 抓滚动条滑块的容差（px）：滑块只有几像素宽，偏一点也要算"抓住了" */
 const SCROLLBAR_GRAB_TOLERANCE_PX = 6;
 /**
@@ -780,7 +788,7 @@ export function App() {
       }
       if (!pressed || Math.hypot(event.clientX - pressed.x, event.clientY - pressed.y) > MOVE_TOLERANCE_PX) return;
       if (controllerRef.current?.active) return;
-      if (modeRef.current !== 'select') {
+      if (!QUICK_ADD_MODES.includes(modeRef.current)) {
         log('workspace:quick-add-skipped', { reason: 'mode', mode: modeRef.current });
         return;
       }
@@ -3110,42 +3118,43 @@ export function App() {
     }
   }, [downloadBytes, getSheet, toast]);
 
-  /** 导出菜单的选项（桥相关项在静态形态下置灰并说明原因） */
+  /**
+   * 导出菜单的选项。
+   *
+   * 用户要求："导出按钮的面板进行优化，**无法使用的功能直接隐藏**"。
+   * 所以这里不是"置灰 + 说明"，而是按**当前真的能不能用**决定放不放进来：
+   *   · `.xlsx` 保真导出：要有打开的**文件**（示例表没有原始字节可回写）→ 没有就不出现；
+   *   · `.csv`：只要有工作表就能导（示例表也行）→ 基本一直在；
+   *   · `.ods/.xls/.xlsb`：要**本地版的转换桥**（本机装了 Excel 才可用）→ 不可用就不出现。
+   * 标签也顺手改短（详细说明放右侧提示位），避免一行字把菜单撑得很宽。
+   */
   const exportMenuItems = useMemo((): MenuItemSpec[] => {
-    const bridgeHint = bridgeUnavailableHint(bridge);
-    const bridgeDisabled = !bridge.available || exportBusy !== null;
-    return [
-      {
-        id: 'export-xlsx-keep',
-        label: '导出 .xlsx（保真，保持原名与其它部件）',
-        shortcut: '默认',
-        disabled: exportBusy !== null,
-      },
-      { id: 'export-csv', label: '导出 .csv（当前工作表，UTF-8 BOM）', disabled: exportBusy !== null },
-      {
+    const hasFile = tabs.length > 0 && activeTabId !== null;
+    const busy = exportBusy !== null;
+    const items: MenuItemSpec[] = [];
+
+    if (hasFile) {
+      items.push({ id: 'export-xlsx-keep', label: '导出 .xlsx（保真）', shortcut: '默认', disabled: busy });
+    }
+    items.push({
+      id: 'export-csv',
+      label: '导出 .csv（当前工作表）',
+      shortcut: 'UTF-8 BOM',
+      disabled: busy,
+    });
+    if (bridge.available && hasFile) {
+      items.push({
         id: 'export-ods',
-        label: '导出 .ods（本地版 · 经本机 Excel，样式完整）',
-        disabled: bridgeDisabled,
-        title: bridgeDisabled ? bridgeHint : undefined,
-        hint: bridge.available ? undefined : bridgeHint,
+        label: '导出 .ods',
+        shortcut: '经本机 Excel',
+        disabled: busy,
         separatorBefore: true,
-      },
-      {
-        id: 'export-xls',
-        label: '导出 .xls（本地版 · 经本机 Excel，样式完整）',
-        disabled: bridgeDisabled,
-        title: bridgeDisabled ? bridgeHint : undefined,
-        hint: bridge.available ? undefined : bridgeHint,
-      },
-      {
-        id: 'export-xlsb',
-        label: '导出 .xlsb（本地版 · 经本机 Excel，体积小）',
-        disabled: bridgeDisabled,
-        title: bridgeDisabled ? bridgeHint : undefined,
-        hint: bridge.available ? undefined : bridgeHint,
-      },
-    ];
-  }, [bridge, exportBusy]);
+      });
+      items.push({ id: 'export-xls', label: '导出 .xls', shortcut: '经本机 Excel', disabled: busy });
+      items.push({ id: 'export-xlsb', label: '导出 .xlsb', shortcut: '经本机 Excel · 体积小', disabled: busy });
+    }
+    return items;
+  }, [activeTabId, bridge.available, exportBusy, tabs.length]);
 
   const handleExportMenuSelect = useCallback(
     (id: string) => {
@@ -4112,6 +4121,7 @@ export function App() {
         onExport={(anchor) => setExportMenu((current) => (current ? null : anchor))}
         exportMenuOpen={exportMenu !== null}
         bridgeAvailable={bridge.available}
+        canExport={exportMenuItems.length > 0}
         onUndo={() => void stepBack()}
         onRedo={() => void stepForward()}
         onToggleHistory={() =>

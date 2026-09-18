@@ -76,6 +76,8 @@ export interface ToolbarProps {
   onKeepSourceChange: (keep: boolean) => void;
   /** 本地版的转换桥可用（决定 `accept` 里要不要带上 .xlsb，以及提示文案） */
   bridgeAvailable?: boolean;
+  /** 导出菜单里是否至少有一项可用（false 时按钮置灰，避免点开一个空菜单） */
+  canExport?: boolean;
 }
 
 function cls(...parts: Array<string | false | undefined>): string {
@@ -105,6 +107,7 @@ export function Toolbar({
   keepSourceOnWorkspaceDrop,
   onKeepSourceChange,
   bridgeAvailable = false,
+  canExport = true,
 }: ToolbarProps): JSX.Element {
   /** 只在真的换了模式时才回调，避免重复点同一个按钮就触发一次"模式变更" */
   const requestMode = (next: InteractionMode): void => {
@@ -124,12 +127,20 @@ export function Toolbar({
 
   return (
     <div className={cls('tb-toolbar', busy && 'is-busy')} aria-busy={busy || undefined}>
-      {/* 打开表格：label 包 input，点图标即打开原生文件选择框（保持 data-testid="file-input" 契约） */}
+      {/*
+        打开表格：label 包 input，点图标即打开原生文件选择框（保持 data-testid="file-input" 契约）。
+
+        光标**写在内联样式上**（用户反馈"打开文件按钮鼠标移上去不会变成手形"）：
+        样式表里的 `.tb-file-btn *` 本来就在，但只要有任何一条后来的规则（或浏览器缓存的旧样式）
+        压过它，指针就会退回箭头 —— 内联样式优先级最高，不会被级联顺序/缓存翻盘。
+        忙时仍然给 `not-allowed`（那时点了真的没反应，不该假装能点）。
+      */}
       <label
         className={cls('tb-icon-btn', 'tb-file-btn', busy && 'is-busy')}
         data-testid="toolbar-open"
-        title={`打开表格（${formatHint}）`}
+        title={busy ? '正在处理上一个文件，稍候再打开' : `打开表格（${formatHint}）`}
         aria-disabled={busy || undefined}
+        style={{ cursor: busy ? 'not-allowed' : 'pointer' }}
       >
         <OpenIcon />
         <input
@@ -140,6 +151,7 @@ export function Toolbar({
           aria-label={`打开表格（${formatHint}）`}
           disabled={busy}
           onChange={handleFileChange}
+          style={{ cursor: busy ? 'not-allowed' : 'pointer' }}
         />
       </label>
 
@@ -148,11 +160,11 @@ export function Toolbar({
           type="button"
           className="tb-icon-btn"
           data-testid="toolbar-export"
-          title="导出（默认：保持原格式与原字节；也可另存为其它格式）"
-          aria-label="导出（默认：保持原格式与原字节；也可另存为其它格式）"
+          title={canExport ? '导出（可另存为其它格式）' : '暂时没有可导出的内容'}
+          aria-label={canExport ? '导出' : '暂时没有可导出的内容'}
           aria-haspopup="menu"
           aria-expanded={exportMenuOpen}
-          disabled={busy}
+          disabled={busy || !canExport}
           onClick={(event) => {
             // 把按钮位置交给上层：导出菜单就挂在这个按钮旁边
             const rect = event.currentTarget.getBoundingClientRect();

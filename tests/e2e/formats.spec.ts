@@ -78,7 +78,7 @@ test.describe('多格式兼容', () => {
       expect(accept, `accept 应含 ${ext}`).toContain(ext);
     }
 
-    // 鼠标移到按钮上：指针必须是手形（用户明确要求）
+    // 鼠标移到按钮上：指针必须是手形（用户明确要求；后来又反馈过一次"还是箭头"）
     const box = await open.boundingBox();
     expect(box).not.toBeNull();
     if (!box) return;
@@ -92,6 +92,40 @@ test.describe('多格式兼容', () => {
       { x: box.x + box.width / 2, y: box.y + box.height / 2 },
     );
     expect(cursor, '打开表格按钮悬停应为手形').toBe('pointer');
+
+    /**
+     * 再钉两层（用户第二次反馈"还是不会变手形"，说明只赌一个来源不够稳）：
+     *  ① 按钮自己（label）与内部透明 input 的 cursor 都必须是 pointer；
+     *  ② 图标区域的四个角也要是手形 —— 指针落在按钮边缘时同样不能退回箭头。
+     */
+    const cursors = await page.evaluate(() => {
+      const label = document.querySelector('[data-testid="toolbar-open"]') as HTMLElement | null;
+      const input = document.querySelector('[data-testid="file-input"]') as HTMLElement | null;
+      return {
+        label: label ? getComputedStyle(label).cursor : null,
+        input: input ? getComputedStyle(input).cursor : null,
+        inline: label?.style.cursor ?? null,
+      };
+    });
+    expect(cursors.label, 'label 的 cursor').toBe('pointer');
+    expect(cursors.input, '透明 input 的 cursor（指针实际停在它上面）').toBe('pointer');
+    expect(cursors.inline, '光标写在内联样式上，任何样式表顺序/缓存都盖不掉').toBe('pointer');
+
+    for (const [dx, dy] of [
+      [2, 2],
+      [box.width - 2, 2],
+      [2, box.height - 2],
+      [box.width - 2, box.height - 2],
+    ] as const) {
+      const point = { x: box.x + dx, y: box.y + dy };
+      await page.mouse.move(point.x, point.y);
+      await page.waitForTimeout(60);
+      const corner = await page.evaluate(({ x, y }: { x: number; y: number }) => {
+        const el = document.elementFromPoint(x, y) as HTMLElement | null;
+        return el ? getComputedStyle(el).cursor : null;
+      }, point);
+      expect(corner, `按钮内 (${dx},${dy}) 处也应是手形`).toBe('pointer');
+    }
   });
 
   test('② 打开真 Excel 导出的 GBK CSV：中文不乱码，并说明"已转换、导出为 xlsx"', async ({ page }) => {

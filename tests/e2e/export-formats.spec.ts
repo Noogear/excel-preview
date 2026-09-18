@@ -66,17 +66,19 @@ test.describe('导出格式与本地转换桥', () => {
 
     await page.click('[data-testid="toolbar-export"]');
     const odsItem = page.locator('[data-testid="context-menu-export-ods"]');
-    await expect(odsItem).toBeVisible();
 
     if (!health.body.available) {
-      // 没装 Excel：必须置灰 + 说清原因（本机如此时也能守护"不要给一个点了没反应的按钮"）
-      await expect(odsItem, 'Excel 不可用时 .ods 导出应置灰').toBeDisabled();
-      await expect(odsItem).toContainText('本地版');
-      console.log(`[bridge] 本机 Excel 不可用：${health.body.reason ?? '未知原因'}`);
+      // 没装 Excel：按用户要求**直接隐藏**（而不是置灰 + 写一行说明），菜单里不该有它
+      await expect(odsItem, 'Excel 不可用时 .ods 那一项应直接隐藏').toHaveCount(0);
+      for (const id of ['export-xls', 'export-xlsb']) {
+        await expect(page.locator(`[data-testid="context-menu-${id}"]`)).toHaveCount(0);
+      }
+      console.log(`[bridge] 本机 Excel 不可用：${health.body.reason ?? '未知原因'}（.ods/.xls/.xlsb 已隐藏）`);
       return;
     }
 
-    await expect(odsItem, 'Excel 可用时 .ods 导出应可点').toBeEnabled({ timeout: 30_000 });
+    await expect(odsItem, 'Excel 可用时 .ods 导出应出现且可点').toBeVisible({ timeout: 30_000 });
+    await expect(odsItem).toBeEnabled({ timeout: 30_000 });
     const [download] = await Promise.all([
       page.waitForEvent('download', { timeout: 150_000 }),
       odsItem.click(),
