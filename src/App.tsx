@@ -137,6 +137,13 @@ import './interaction/swap-animation.css';
 
 const CONTAINER_ID = 'univer-container';
 /**
+ * "还没有打开任何文件"时的状态栏提示。
+ *
+ * 抽成常量是因为它现在有**两个**入口：启动引导、以及"关掉最后一个标签后摆回占位单元"——
+ * 两处必须一字不差，否则用户会觉得工具状态变了样（一处说"拖入文件"，另一处还挂着上一份文件的统计）。
+ */
+const IDLE_STATUS_TEXT = `拖入表格文件（${SUPPORTED_EXTENSIONS.join(' / ')}）或使用左侧示例开始`;
+/**
  * "算不算一次拖动"的位移阈值（px）。
  *
  * 取 8 而不是 4：鼠标/触控板按下时的**手抖**很容易超过 4px，于是"点一下"被当成"拖了一下"，
@@ -2308,7 +2315,7 @@ export function App() {
       });
 
       setStatus('ready');
-      setStatusText(`拖入表格文件（${SUPPORTED_EXTENSIONS.join(' / ')}）或使用左侧示例开始`);
+      setStatusText(IDLE_STATUS_TEXT);
       log('app:ready');
     } catch (error) {
       log('app:boot-error', { message: String(error), stack: (error as Error)?.stack });
@@ -2667,6 +2674,15 @@ export function App() {
         }
       }
       snapshotActiveEditsRef.current(); // 关闭前先落一次编辑（导出的脏格账本与之一致）
+      /**
+       * **关掉最后一个标签：必须"先摆占位、再释放"**（顺序反了就是用户报的白屏）。
+       *
+       * 原因见 `restorePlaceholderUnit`：唯一的活动单元被释放后，Univer 会把当前单元置成 `null`
+       * 并把 canvas 摘掉；渲染根一旦被回收，之后**新建工作簿也画不回来**（实测），只能刷新。
+       * 所以趁旧单元还活着，先把占位单元建成当前单元，再释放它 —— 全程至少有一个单元。
+       */
+      const isLastTab = tabsDataRef.current.length === 1;
+      if (isLastTab) restorePlaceholderRef.current('last-tab-closing');
       try {
         apiRef.current?.disposeUnit(id);
       } catch (error) {
@@ -2694,6 +2710,10 @@ export function App() {
           activeTabIdRef.current = null;
           setActiveTabId(null);
           parsedRef.current = null;
+          // 舞台那边已经摆回占位单元（见上面 isLastTab），状态栏也回到"刚打开工具"的样子：
+          // 不清摘要的话，没有文件还挂着「40 单元格 / 降级 3 项」这种上一位用户的信息。
+          setSummary(null);
+          setStatusText(IDLE_STATUS_TEXT);
         }
       }
       syncTabs();
@@ -2723,6 +2743,72 @@ export function App() {
       log('focus:error', { id, message: String(error) });
     }
   }, []);
+
+  /**
+   * 舞台主画布还在不在。
+   *
+   * 为什么值得单独判：**把最后一个单元 `disposeUnit` 掉之后，容器里连 canvas 都会没有**
+   * （实测 `canvasCount: 0`），这时"切当前单元"是空动作 —— 没有渲染根可切。
+   */
+  const hasSheetCanvas = (): boolean => document.querySelector(`#${CONTAINER_ID} canvas`) !== null;
+
+  /**
+   * **摆回"占位单元"**：Univer 里必须**始终至少有一个单元**，否则渲染根会被一起回收。
+   *
+   * 用户给的复现路径（实测已复现，就是他说的白屏）：
+   *   打开文件 → 等备份落盘 → 刷新（会话还原）→ **把还原出来的那个标签关掉** → 再打开文件 ⇒ 白屏。
+   *
+   * 实测到的机制（每一条都是打日志量出来的）：
+   *   ① 关掉最后一个标签 → 唯一的活动单元被释放 → **当前单元变成 `null`** → 容器里的 canvas 被摘掉
+   *      （`canvasCount: 0`），舞台立刻全白；
+   *   ② 同时 Univer 的公式栏开始抛 `Cannot read properties of null (reading 'activeSheet$')`；
+   *   ③ 之后打开新文件，**模型全对**（状态栏连"解析 3ms / 渲染 15ms"都打出来了，`unit === tab`），
+   *      但画布回不来：自愈会记 `render:rebind` → 再记 `render:rebind-failed`。
+   *      **关键**：这时候就算新建工作簿也救不回来（实测新建之后 canvas 仍然是 0）——
+   *      渲染根一旦被回收，JS 这边只能靠重新引导（也就是刷新）。
+   *   ④ 启动时之所以没这个问题：那时摆着"示例工作簿"（`p0-workbook`）这个占位单元。
+   *
+   * 所以唯一的可靠修法是**不让单元数走到 0**：关最后一个标签时，**先**把占位单元建好并切成当前单元，
+   * **再**释放那个标签的单元（见 `closeTab`）。摆上之后舞台回到"刚打开工具"的样子，也就能继续开新文件。
+   *
+   * @param reason
+   *  - `last-tab-closing`：即将关掉最后一个标签（**在释放之前**调用；不检查标签账本）
+   *  - `empty-tabs`：标签已经是空的（兜底，正常不会走到）
+   *  - `dead-render-root`：容器里连 canvas 都没有了（尽力而为：实测这种状态救不回来，只留证据）
+   */
+  const restorePlaceholderUnit = useCallback(
+    (reason: 'last-tab-closing' | 'empty-tabs' | 'dead-render-root'): boolean => {
+      const api = apiRef.current;
+      if (!api) return false;
+      if (reason === 'empty-tabs' && tabsDataRef.current.length > 0) return false;
+      if (reason === 'dead-render-root' && hasSheetCanvas()) return false;
+      try {
+        /**
+         * 已经有一个占位簿时就**只把它切成当前单元**，不再新建：
+         * 会话恢复那一瞬间 `tabs` 也可能是空的，这期间可能已经摆过一个（见下面的兜底 effect），
+         * 同一个 id 建两份会让 `disposeSampleWorkbook` 只放掉其中一份，留下"看不见的常驻工作簿"。
+         */
+        const existing = api.getWorkbook(SAMPLE_WORKBOOK_ID);
+        if (!existing) {
+          loadWorkbook(api, createSampleWorkbook());
+        }
+        instanceServiceRef.current?.setCurrentUnitForType(SAMPLE_WORKBOOK_ID);
+        focusSheetUnit(SAMPLE_WORKBOOK_ID);
+        attachSheetDeps();
+        log('tab:placeholder-created', { reason, id: SAMPLE_WORKBOOK_ID, created: !existing });
+        return !existing;
+      } catch (error) {
+        log('tab:placeholder-error', { reason, message: String(error) });
+        return false;
+      }
+    },
+    [attachSheetDeps, focusSheetUnit],
+  );
+  /** `closeTab` 之后的兜底 effect 用它判断"是不是真的开过标签"（见那个 effect 的说明） */
+  const hadTabsRef = useRef(false);
+  /** `closeTab` 比它先定义（两边都要用 `attachSheetDeps`/`focusSheetUnit`），用 ref 转发 */
+  const restorePlaceholderRef = useRef(restorePlaceholderUnit);
+  restorePlaceholderRef.current = restorePlaceholderUnit;
 
   /**
    * **兜底自愈**：确认"活动标签 = 画布上真正渲染的那个工作簿"，不是就重新绑一次。
@@ -2769,6 +2855,12 @@ export function App() {
       if (first.ok) return true;
       log('render:rebind', { id, active: first.active, canvasWidth: first.canvasWidth });
       try {
+        /**
+         * **渲染根整个没了**（容器里连 canvas 都没有，例如"最后一个标签被关掉"）：
+         * 这时候切当前单元是空动作，得先用占位单元把渲染根拉起来，再切到目标单元。
+         * 不补这一步，自愈就只会一路记 `render:rebind-failed`（用户看到的就是怎么点都不出画面）。
+         */
+        if (!hasSheetCanvas()) restorePlaceholderUnit('dead-render-root');
         instanceServiceRef.current?.setCurrentUnitForType(id);
         focusSheetUnit(id);
         attachSheetDeps();
@@ -2777,11 +2869,40 @@ export function App() {
         log('render:rebind-error', { id, message: String(error) });
       }
       const after = await settle(RENDER_REBIND_MS);
-      if (!after.ok) log('render:rebind-failed', { id, active: after.active, canvasWidth: after.canvasWidth });
+      if (!after.ok) {
+        log('render:rebind-failed', { id, active: after.active, canvasWidth: after.canvasWidth });
+        /**
+         * 诚实兜底：渲染根被回收之后，JS 这边**救不回来**（实测新建工作簿也没用），
+         * 只有重新引导（刷新）能恢复。与其让用户对着白舞台反复点，不如直接说清楚 ——
+         * 数据都在本机（会话在 IndexedDB 里），刷新不会丢。
+         */
+        if (!hasSheetCanvas()) toast('画面没能恢复，请按 F5 刷新页面（已打开的文件与编辑不会丢）', 'warn');
+      }
       return after.ok;
     },
-    [attachSheetDeps, focusSheetUnit],
+    [attachSheetDeps, focusSheetUnit, restorePlaceholderUnit, toast],
   );
+
+  /**
+   * **兜底：标签从"有"变成"没有"之后再确认一次占位单元还在**（主路径见 `closeTab`，那里是"先摆后放"）。
+   *
+   * 只在**真的开过标签**之后才动手（`hadTabsRef`）：
+   * 启动与"会话恢复还没跑完"的那一瞬间 `tabs` 也是空的，那时候去摆一个占位簿会多出一份
+   * 谁也管不着的工作簿（实测会让 `disposeSampleWorkbook` 只放掉其中一份）。
+   */
+  useEffect(() => {
+    if (tabs.length > 0) {
+      hadTabsRef.current = true;
+      return;
+    }
+    if (!hadTabsRef.current) return;
+    hadTabsRef.current = false;
+    if (restoringRef.current) return; // 恢复中，`tabs` 空只是暂时的
+    if (restorePlaceholderUnit('empty-tabs')) {
+      setSummary(null);
+      setStatusText(IDLE_STATUS_TEXT);
+    }
+  }, [tabs.length, restorePlaceholderUnit]);
 
   /**
    * 把**指定标签**上被改过的单元格读出来，累积进 `editsByTab`。

@@ -186,4 +186,89 @@ test.describe('打开文件不会白屏（回归）', () => {
     expect(kinds, '应当记录"重绑"').toContain('render:rebind');
     expect(kinds, '不该出现重绑失败').not.toContain('render:rebind-failed');
   });
+
+  /**
+   * ⑤ **用户给的确切复现路径**（这条真复现出来了，前面几条反而都没复现到）：
+   *   打开一个文件 → 等备份存进库 → 过几秒刷新页面 → **把还原出来的那个标签关掉** → 再打开文件 ⇒ 白屏。
+   *
+   * 机制（一步一步打日志量出来的）：
+   *   关掉最后一个标签时，`disposeUnit` 释放的是**唯一**的活动单元 → Univer 把当前单元置成 `null`、
+   *   把 canvas 一起摘掉（`canvasCount: 0`）→ 舞台全白；公式栏还会抛 `activeSheet$` 空指针。
+   *   之后**再打开文件，模型全对但画布回不来** —— 连新建工作簿都没用（实测 canvas 仍是 0），
+   *   因为渲染根已经被回收，JS 这边只能靠刷新。
+   * 修法：关最后一个标签时**先摆占位单元、再释放**（`tab:placeholder-created`），单元数永远不为 0。
+   */
+  test('⑤ 关掉还原出来的标签后再打开文件：不能白屏', async ({ page }) => {
+    test.setTimeout(180_000);
+    const pageErrors: string[] = [];
+    page.on('pageerror', (error) => pageErrors.push(String(error).slice(0, 200)));
+    page.on('dialog', (dialog) => void dialog.accept());
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await waitForBoot(page);
+
+    // ① 打开一个文件
+    await importFixture(page, FIXTURE);
+    // ② 等备份真的存进库（自动保存最坏 2000+800ms，别写死 sleep）
+    await expect
+      .poll(
+        () =>
+          page.evaluate(async (modulePath: string) => {
+            const mod = (await import(/* @vite-ignore */ modulePath)) as {
+              createSessionStore: () => { load: () => Promise<{ tabs: unknown[] } | null> };
+            };
+            const state = await mod.createSessionStore().load();
+            return state ? state.tabs.length : 0;
+          }, '/src/persistence/session.ts'),
+        { timeout: 30_000, message: '自动保存应当把这份会话写进库' },
+      )
+      .toBe(1);
+
+    // ③ 过几秒刷新（走会话还原）
+    await page.waitForTimeout(3000);
+    await page.reload();
+    await waitForBoot(page);
+    await page.waitForFunction(
+      () =>
+        (window as never as { __p0: { log: Array<{ kind: string }> } }).__p0.log.some(
+          (entry) => entry.kind === 'session:restore-done',
+        ),
+      null,
+      { timeout: 30_000 },
+    );
+
+    // ④ 把还原出来的那个标签关掉
+    const restored = await page.evaluate(
+      () => (window as never as { __p0: { getTabs: () => Array<{ id: string }> } }).__p0.getTabs()[0]?.id ?? null,
+    );
+    expect(restored, '刷新后应当还原出一个标签').toBeTruthy();
+    await page.click(`[data-testid="toolbar-tab-close-${restored}"]`);
+    await page.waitForTimeout(1500);
+
+    const closed = await stageState(page);
+    console.log('[regression] 关掉最后一个标签后:', JSON.stringify(closed));
+    expect(closed.canvasWidth, '关掉最后一个标签后舞台不能变白（占位单元必须先摆上）').toBeGreaterThan(200);
+    expect(closed.rootChildren, '#root 不该是空的').toBeGreaterThan(0);
+    expect(closed.crash).toBe(0);
+    expect(await logKinds(page), '应当摆回占位单元').toContain('tab:placeholder-created');
+
+    // ⑤ 再打开一个文件 —— 这里以前就是白屏
+    await importFixture(page, 'fixture-numfmt.xlsx');
+    await page.waitForTimeout(800);
+    const reopened = await stageState(page);
+    console.log('[regression] 再打开文件后:', JSON.stringify(reopened));
+    expect(reopened.canvasWidth, '再打开文件后画布必须有可见宽度（不能白屏）').toBeGreaterThan(200);
+    expect(reopened.crash).toBe(0);
+
+    const binding = await page.evaluate(() => {
+      const p0 = (window as never as {
+        __p0: { getActiveTabId: () => string | null; getActiveWorkbookId: () => string | null };
+      }).__p0;
+      return { tab: p0.getActiveTabId(), unit: p0.getActiveWorkbookId() };
+    });
+    expect(binding.unit, '画布绑定的就是新打开的那个文件').toBe(binding.tab);
+
+    const kinds = await logKinds(page);
+    expect(kinds, '不该出现"重绑失败"（说明根本没走到"渲染根没了"那一步）').not.toContain('render:rebind-failed');
+    expect(pageErrors, '不该有页面级异常（以前这里是公式栏的 activeSheet$ 空指针）').toEqual([]);
+  });
 });
