@@ -325,6 +325,14 @@
   line-height: 1.6;
 }
 
+/* 空态里的"捷径"提示：比正文更淡一档，不抢主按钮的注意力 */
+.ws-empty-tip {
+  max-width: 15em;
+  color: var(--ws-faint);
+  font-size: 11px;
+  line-height: 1.6;
+}
+
 /* 空态里也能直接导入（「+」在右上角，这里给一个更显眼的入口） */
 .ws-empty-add {
   padding: 3px 10px;

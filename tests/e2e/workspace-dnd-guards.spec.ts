@@ -103,36 +103,37 @@ test.describe('工作区拖放：不该发生的"自我复制 / 误加入"', () 
     expect(await items(page), '面板内部拖动不应该改变条目数量').toHaveLength(2);
   });
 
-  test('③ 选择模式：选中单元格后"点"工作区空白处（含 5px 手抖）不会把单元格加进去', async ({ page }) => {
+  /**
+   * ③ 与"快速加入"的边界（功能本身在 `workspace-quick-add.spec.ts` 里测）。
+   *
+   * 这里只钉住**不该发生**的两种情形：选区"过期"后点空白不动手；以及点空白**不会**把条目又收一份。
+   */
+  test('③ 选择模式：选区过期后点工作区空白不会加入；重复点也不会收两遍', async ({ page }) => {
     test.setTimeout(120_000);
     await switchMode(page, 'select');
     const panel = await page.locator('.ws-panel').boundingBox();
     if (!panel) throw new Error('工作区不可见');
 
-    const clickBlank = async (): Promise<void> => {
-      const rect = await waitRect(page, 'B3');
-      await page.mouse.click(rect.left + rect.width / 2, rect.top + rect.height / 2);
-      await page.waitForTimeout(150);
-      // 面板空白处：按下 → 抖 5px（小于 8px 阈值）→ 松手
-      const blankX = panel.x + panel.width / 2;
-      const blankY = panel.y + panel.height - 36;
-      await page.mouse.move(blankX, blankY);
-      await page.mouse.down();
-      await page.mouse.move(blankX + 3, blankY + 4, { steps: 2 });
-      await page.mouse.up();
-      await page.waitForTimeout(400);
-    };
+    const blankX = panel.x + panel.width / 2;
+    const blankY = panel.y + panel.height - 36;
 
-    await clickBlank();
-    expect(await items(page), '空工作区：点空白 + 手抖也不该凭空多出一条').toHaveLength(0);
+    // 先选中一个格子，然后**等过窗口期**（> 3 秒）再点空白 → 不该加入
+    const rect = await waitRect(page, 'B3');
+    await page.mouse.click(rect.left + rect.width / 2, rect.top + rect.height / 2);
+    await page.waitForTimeout(3600);
+    await page.mouse.click(blankX, blankY);
+    await page.waitForTimeout(400);
+    expect(await items(page), '选区过期后点空白不该凭空多出条目').toHaveLength(0);
+    expect(await logKinds(page), '应记录"选区过期"这次跳过').toContain('workspace:quick-add-skipped');
 
-    // 工作区里有条目时再试一次（点列表下方空白）
+    // 工作区里有条目时，点列表下方空白同样不该把已有条目再收一份
     await seedItem(page, 'A1');
-    await clickBlank();
+    await page.waitForTimeout(3600);
+    await page.mouse.click(blankX, blankY);
+    await page.waitForTimeout(400);
     const after = await items(page);
-    expect(after, '有 1 条时点空白也不该多出第二条').toHaveLength(1);
-    expect(after[0].a1, '而且不该换成刚选中的 B3').toBe('A1');
-    expect(await logKinds(page), '不该有新的加入记录').not.toContain('workspace:add');
+    expect(after, '有 1 条时点空白不该多出第二条').toHaveLength(1);
+    expect(after[0].a1, '也不该换成别的格子').toBe('A1');
   });
 
   test('④ 修好之后正常功能仍在：条目拖到表格单元格上照旧写回', async ({ page }) => {

@@ -261,6 +261,8 @@ export function WorkspacePanel({
             ⤓
           </span>
           <span className="ws-empty-text">拖拽表格中的单元格到此处暂存</span>
+          {/* 这条捷径的发现性靠这行字：选中后 3 秒内点这片空白就能加入（见 App 的 handleWorkspaceBlankClick） */}
+          <span className="ws-empty-tip">选择模式下：选中单元格后点这片空白也能加入</span>
           <button type="button" className="ws-empty-add" data-testid="workspace-empty-add" onClick={onAddItem}>
             或点这里从当前表导入
           </button>

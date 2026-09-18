@@ -1,4 +1,13 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type Dispatch,
+  type MouseEvent as ReactMouseEvent,
+  type SetStateAction,
+} from 'react';
 
 import { ICommandService, IConfigService, IContextService, IUndoRedoService, IUniverInstanceService, LocaleType, type IRange } from '@univerjs/core';
 import type { FUniver } from '@univerjs/core/facade';
@@ -130,12 +139,18 @@ const CONTAINER_ID = 'univer-container';
 /**
  * "算不算一次拖动"的位移阈值（px）。
  *
- * 取 8 而不是 4（用户实测反馈的第二条："选择模式下，选中单元格后…点击工作区空白区域时，
- * 会把单元格加到工作区"）：鼠标/触控板按下时的**手抖**很容易超过 4px，于是"点一下"被当成"拖了一下"，
- * 松手落在工作区上就执行了落点动作（把单元格加进去、或把条目又收一份）。
- * 8px 是常见的"点击 vs 拖动"分界：点选、点工作区条目仍然算点击，真正的拖动也照样起得来。
+ * 取 8 而不是 4：鼠标/触控板按下时的**手抖**很容易超过 4px，于是"点一下"被当成"拖了一下"，
+ * 松手落在工作区上就执行了落点动作（把单元格又收一份）。8px 是常见的"点击 vs 拖动"分界：
+ * 点选、点工作区条目仍然算点击，真正的拖动也照样起得来。
  */
 const MOVE_TOLERANCE_PX = 8;
+/**
+ * 「选中后点工作区空白就能加入」的时间窗（毫秒）。
+ *
+ * 用户要求："选择模式下，选中单元格后在三秒内点击工作区空白区域时，会把单元格加到空白区域"。
+ * 3 秒是"刚选完"的直觉窗口：超时后再点空白就不动手（避免用户只是随手点一下就莫名多出条目）。
+ */
+const QUICK_ADD_WINDOW_MS = 3000;
 /** 抓滚动条滑块的容差（px）：滑块只有几像素宽，偏一点也要算"抓住了" */
 const SCROLLBAR_GRAB_TOLERANCE_PX = 6;
 /**
@@ -225,6 +240,15 @@ export function App() {
   const pendingWorkspaceDragRef = useRef<{ snapshot: RangeSnapshot; x: number; y: number; started: boolean } | null>(null);
   /** 这一次按下落在哪个工作区条目上（没拖动就松手 = 点击，用于"点击互换"选边） */
   const pendingWorkspaceClickRef = useRef<RangeSnapshot | null>(null);
+  /**
+   * 最近一次"在表格里动手"的时间（点选单元格 / 在表格上按键）。
+   * 「选中后点工作区空白就能加入」这条捷径靠它判断"是不是刚选完"（见 `QUICK_ADD_WINDOW_MS`）。
+   */
+  const lastGridInteractionAtRef = useRef(0);
+  /** 工作区面板上按下的位置：用于把"点一下空白"和"拖到面板里松手"区分开 */
+  const workspacePressRef = useRef<{ x: number; y: number } | null>(null);
+  /** 最近一次"快速加入"用的选区（同一次选区只加一次，避免连点收两遍） */
+  const lastQuickAddRef = useRef<{ key: string; at: number } | null>(null);
   /** `handleWorkspaceItemClick` 的 ref 版本（指针监听装配得比它早） */
   const handleWorkspaceItemClickRef = useRef<(item: RangeSnapshot) => void>(() => {});
   const dropHandlerRef = useRef<(payload: DragPayload, target: DropTarget | null, pointer: { x: number; y: number }) => void>(() => {});
@@ -725,6 +749,73 @@ export function App() {
     const rect = el.getBoundingClientRect();
     return pointer.x >= rect.left && pointer.x <= rect.right && pointer.y >= rect.top && pointer.y <= rect.bottom;
   }, []);
+
+  /**
+   * **快速加入**：选择模式下，刚在表格里选过单元格（{@link QUICK_ADD_WINDOW_MS} 内）时，
+   * 点工作区面板的**空白处**就把当前选区收进工作区。
+   *
+   * 用户要求："选择模式下，选中单元格后在三秒内点击工作区空白区域时，会把单元格加到空白区域"。
+   *
+   * 判定上刻意收得很紧（宁可不动手，也不要误加）：
+   *  ① 必须是**点击**（按下与松开位移 < {@link MOVE_TOLERANCE_PX}）——拖到面板里松手不算；
+   *  ② 落点必须是**真正的空白**（不在条目、按钮、输入框、下拉、标签上）；
+   *  ③ 只在**选择模式**生效：拖拽/点击互换模式下点击空白不做任何事，免得和那两种模式的手势打架；
+   *  ④ 必须是"刚在表格里动过手"（3 秒内）——超时后点空白只是点空白；
+   *  ⑤ **同一次选区只加一次**：连点两下不会收两遍（重复点击记 `workspace:quick-add-duplicate`）。
+   *
+   * 落地仍然走唯一入口 `addWorkspaceFromRanges`：逐格拆分、跳过空内容、按 id 去重、可撤销。
+   */
+  const handleWorkspaceBlankClick = useCallback(
+    (event: ReactMouseEvent<HTMLDivElement>) => {
+      const pressed = workspacePressRef.current;
+      workspacePressRef.current = null;
+
+      const target = event.target as HTMLElement | null;
+      if (
+        target?.closest(
+          '[data-testid="workspace-item"], button, input, select, textarea, label, a, .ws-panel-head, .ws-panel-foot, .ws-splitter',
+        )
+      ) {
+        return;
+      }
+      if (!pressed || Math.hypot(event.clientX - pressed.x, event.clientY - pressed.y) > MOVE_TOLERANCE_PX) return;
+      if (controllerRef.current?.active) return;
+      if (modeRef.current !== 'select') {
+        log('workspace:quick-add-skipped', { reason: 'mode', mode: modeRef.current });
+        return;
+      }
+
+      const since = Date.now() - lastGridInteractionAtRef.current;
+      if (lastGridInteractionAtRef.current === 0 || since > QUICK_ADD_WINDOW_MS) {
+        log('workspace:quick-add-skipped', { reason: 'stale-selection', since });
+        return;
+      }
+
+      const a1List = readSelectionA1List();
+      if (a1List.length === 0) {
+        log('workspace:quick-add-skipped', { reason: 'no-selection' });
+        return;
+      }
+
+      const key = a1List.join(' ');
+      const last = lastQuickAddRef.current;
+      if (last && last.key === key && Date.now() - last.at <= QUICK_ADD_WINDOW_MS) {
+        log('workspace:quick-add-duplicate', { a1: key });
+        return;
+      }
+
+      const outcome = addWorkspaceFromRanges(a1List, { x: event.clientX, y: event.clientY });
+      lastQuickAddRef.current = { key, at: Date.now() };
+      log('workspace:quick-add', {
+        a1: key,
+        blocks: a1List.length,
+        items: outcome.items.length,
+        skipped: outcome.skipped,
+        ok: outcome.ok,
+      });
+    },
+    [addWorkspaceFromRanges, readSelectionA1List],
+  );
 
   dropHandlerRef.current = (payload, target, pointer) => {
     const sheet = getSheet();
@@ -1981,6 +2072,13 @@ export function App() {
           return;
         }
         const wasDragging = pressRef.current?.dragging ?? false;
+        const wasGridPress = pressRef.current?.onGrid ?? false;
+        /**
+         * 记下"刚在表格里点过"：`handleWorkspaceBlankClick` 用它判断
+         * "选中单元格后短时间内点工作区空白 = 快速加入"这条捷径是否在窗口期内。
+         * 只认**没拖动的表格按下**（拖动是搬运语义，不该同时触发快速加入）。
+         */
+        if (wasGridPress && !wasDragging) lastGridInteractionAtRef.current = Date.now();
         pressRef.current = null;
         const pending = pendingWorkspaceDragRef.current;
         const wasWorkspaceDrag = pending?.started ?? false;
@@ -2015,10 +2113,24 @@ export function App() {
       window.addEventListener('pointerdown', onPointerDown, true);
       window.addEventListener('pointermove', onPointerMove, true);
       window.addEventListener('pointerup', onPointerUp, true);
+      /**
+       * 键盘也算"在表格里动手"：用方向键/Shift+方向键改选区后，同样应该能在 3 秒内
+       * 点工作区空白把选区收进去（user 那条捷径的键盘版）。只在焦点确实落在表格容器里时才算。
+       */
+      const onKeyDownInSheet = (event: KeyboardEvent): void => {
+        const container = containerRef.current;
+        if (!container) return;
+        const active = document.activeElement;
+        const inside =
+          (active instanceof Node && container.contains(active)) || (event.target instanceof Node && container.contains(event.target));
+        if (inside) lastGridInteractionAtRef.current = Date.now();
+      };
+      window.addEventListener('keydown', onKeyDownInSheet, true);
       cleanups.push(() => {
         window.removeEventListener('pointerdown', onPointerDown, true);
         window.removeEventListener('pointermove', onPointerMove, true);
         window.removeEventListener('pointerup', onPointerUp, true);
+        window.removeEventListener('keydown', onKeyDownInSheet, true);
       });
 
       // 活动工作表变化 → 重装格式锁与元信息
@@ -4055,7 +4167,17 @@ export function App() {
           onPointerDown={startSidebarResize}
         />
 
-        <div className="workspace-host" ref={sidebarRef}>
+        <div
+          className="workspace-host"
+          ref={sidebarRef}
+          data-testid="workspace-host"
+          // 记下按下的位置：松手时用它区分"点一下空白"与"拖到面板里松手"
+          onPointerDown={(event) => {
+            workspacePressRef.current = { x: event.clientX, y: event.clientY };
+          }}
+          // 选择模式下：刚在表格里选过（3 秒内）→ 点这片空白就把选区收进工作区
+          onClick={handleWorkspaceBlankClick}
+        >
           <WorkspacePanel
             items={items}
             settings={settings}
