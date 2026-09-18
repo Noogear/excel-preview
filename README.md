@@ -1,5 +1,10 @@
 # excel-preview — 纯前端 Excel 高保真预览与编辑工具
 
+> **在线版（静态托管，打开即用）**：<https://noogear.github.io/excel-preview/> ——
+> 纯前端、无需安装；文件都在你自己的浏览器里解析，**不上传任何服务器**。
+> 在线版为了免安装牺牲了"经本机 Excel 另存为 .ods/.xls/.xlsb"这类能力（菜单里会置灰并说明）；
+> 需要它们就用本地版：`run.cmd`（或 `npm run dev`）。
+>
 > **形态**：同一套代码出两份产物 —— **本地版**（`run.cmd` / `npm run dev`，带"本机 Excel 转换桥"：
 > `.ods/.xls/.xlsb` 导出与 `.xlsb` 导入都完整保真）与 **静态版**（`npm run build:static`，可直接托管到
 > GitHub / Gitee / EdgeOne Pages，桥相关入口自动置灰并说明"本地版可用"）。详见下文「双形态」。
@@ -10,7 +15,7 @@
 > - P1 交付说明：[`P1-保真与导出-交付说明.md`](./P1-保真与导出-交付说明.md)
 > - P3 交付说明（10 项需求逐条 + 性能实测 + 已知边界）：[`P3-内容锁定与工作区-交付说明.md`](./P3-内容锁定与工作区-交付说明.md)
 > - P5 方案（多格式导入导出 / 库选型 / 双形态 / 静态托管）：[`P5-导入导出多格式与库选型-方案.md`](./P5-导入导出多格式与库选型-方案.md)
-> - 需求可行性与方案：上一级目录的 [`Excel预览工具-可行性评估.md`](../Excel预览工具-可行性评估.md)
+> - 需求可行性与方案（仓库外）：上级目录的 `Excel预览工具-可行性评估.md`
 >
 > 已可用的能力：导入 xlsx / xlsm / ods / xls / csv（宏原样保留、不执行；后三种自动转换为 xlsx）并渲染（边框/填充/字体/对齐/合并/行列尺寸/数字格式/冻结/公式缓存值、
 > **条件格式四类 / 数据验证 / 超链接 / 批注 / 浮动图片 / Excel 表格斑马纹**、自动换行行高自适应）、
@@ -143,7 +148,7 @@ npm run dev          # http://localhost:5273
 
 > **关于"只保留 zh-CN 语言包"**：构建日志里曾出现 `de-1901 / hu / th / ru / uk …` 几十个"语言文件"，
 > 它们其实是 `@univerjs/engine-render` 里给**文档排版**用的**断词词典**（69 种语言，动态 import）。
-> 本工具只用表格、从不创建文档排版器，所以构建期由 `build/vite-plugin-drop-hyphenation.ts` 把那张表清空
+> 本工具只用表格、从不创建文档排版器，所以构建期由 `vite-plugins/vite-plugin-drop-hyphenation.ts` 把那张表清空
 > （`loadPattern()` 里本来就有 `if (!loader) return;`），产物里**不再有任何非中文语言数据**
 > （已核：无 `Arbeitsblätter` / `Feuilles de calcul` / `"de-DE"` 等字面量，只有中文文案）。
 > 用 `npm run measure:bundle` 可以随时体检（断词词典数量必须为 0）；e2e 的启动预算用例也会断言。

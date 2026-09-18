@@ -7,7 +7,7 @@
   Excel 是这些格式的"原生实现"，它另存出来的文件与"人工打开再另存"完全等价 —— 保真的唯一可靠办法。
   见 `P5-导入导出多格式与库选型-方案.md` 第 1 节。
 
-  由 Vite 中间件（`build/vite-plugin-excel-bridge.ts`）调用：
+  由 Vite 中间件（`vite-plugins/vite-plugin-excel-bridge.ts`）调用：
     · 导出：先得到"当前内容的 xlsx 字节" → 本脚本 SaveAs 成 .ods/.xls/.xlsb
     · 导入：把 .xlsb 等交给 Excel 打开 → SaveAs 成 xlsx → 交回浏览器走自研解析器
 

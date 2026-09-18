@@ -16,7 +16,7 @@ on:
     # 只在工具本体变化时重建（文档改动没必要重新发布）
     paths:
       - 'src/**'
-      - 'build/**'
+      - 'vite-plugins/**'
       - 'index.html'
       - 'package.json'
       - 'package-lock.json'

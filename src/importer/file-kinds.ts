@@ -19,7 +19,7 @@
  *
  * 仍然打不开的（明确拒绝 + 指路，不做"半支持"）：
  *  - `.xlsb`：Excel 的**二进制** OOXML（zip 里是 binary parts，不是 XML）。**本地版**可以借本机 Excel
- *    先转成 xlsx 再打开（见 `src/shell/app-form.ts` 与 `build/vite-plugin-excel-bridge.ts`）；
+ *    先转成 xlsx 再打开（见 `src/shell/app-form.ts` 与 `vite-plugins/vite-plugin-excel-bridge.ts`）；
  *    静态托管版没有本机进程，仍按"打不开"处理并说明原因；
  *  - `.numbers` / `.et` / `.ett`：iWork / WPS 私有格式；
  *  - 其它（PDF/图片/纯文本日志…）根本不是表格。

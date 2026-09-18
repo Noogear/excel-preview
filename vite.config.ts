@@ -1,8 +1,8 @@
 import react from '@vitejs/plugin-react';
 import { defineConfig } from 'vitest/config';
 
-import { dropUnusedHyphenationPatterns } from './build/vite-plugin-drop-hyphenation';
-import { excelBridgePlugin } from './build/vite-plugin-excel-bridge';
+import { dropUnusedHyphenationPatterns } from './vite-plugins/vite-plugin-drop-hyphenation';
+import { excelBridgePlugin } from './vite-plugins/vite-plugin-excel-bridge';
 
 /**
  * 双形态（用户要求"静态、本地双形态"）：
@@ -26,7 +26,7 @@ export default defineConfig(({ mode }) => {
       react(),
       dropUnusedHyphenationPatterns(),
       // 本地版才挂转换桥；静态版（--mode static）连插件都不启用
-      excelBridgePlugin({ form: APP_FORM, root: __dirname, log: (message) => console.log(message) }),
+      excelBridgePlugin({ form: APP_FORM, root: __dirname, log: (message: string) => console.log(message) }),
     ],
     base: APP_FORM === 'static' ? './' : '/',
     define: {
