@@ -1,0 +1,205 @@
+===== fixture-styles.xlsx =====
+sharedStrings 中有 1 条富文本（多 run）已降级为纯文本，run 级格式丢失
+--- sheet "样式" hidden=undefined veryHidden=undefined freeze={"row":1,"col":1} grid=undefined defRowH=18 defColW=10 dim={"startRow":0,"startCol":0,"endRow":20,"endCol":7}
+  cols={"0":{"width":18,"customWidth":true},"1":{"width":14,"customWidth":true},"2":{"width":14,"customWidth":true},"3":{"width":22,"customWidth":true},"4":{"width":12,"customWidth":true},"5":{"width":12,"customWidth":true},"6":{"width":30,"customWidth":true},"7":{"width":9,"hidden":true,"customWidth":true}}
+  rows={"0":{"height":32,"customHeight":true},"2":{"height":44,"customHeight":true},"5":{"height":30,"customHeight":true},"19":{"height":48,"customHeight":true},"20":{"hidden":true}}
+  merges=[{"startRow":0,"startCol":0,"endRow":0,"endCol":5}]
+    r0c0 v="样式保真样本（P0 fixture）" f= s=1
+    r0c1 v=undefined f= s=1
+    r0c2 v=undefined f= s=1
+    r0c3 v=undefined f= s=1
+    r0c4 v=undefined f= s=1
+    r0c5 v=undefined f= s=1
+    r1c0 v="区域" f= s=2
+    r1c1 v="数量" f= s=2
+    r1c2 v="单价" f= s=2
+    r1c3 v="生效日期" f= s=2
+    r1c4 v="占比" f= s=2
+    r1c5 v="备注" f= s=2
+    r1c6 v="列宽30" f= s=
+    r1c7 v="这列被隐藏" f= s=
+    r2c3 v="自动换行的长文本，用于验证 wrapText 与行高自适应" f= s=3
+    r2c4 v="粗体" f= s=4
+    r2c5 v="粗蓝 + 斜体 + 下划线绿" f= s=5
+    r3c3 v="缩进2级" f= s=6
+    r3c4 v="斜体" f= s=7
+    r3c5 v="medium" f= s=8
+    r4c3 v="旋转45°" f= s=9
+    r4c4 v="下划线" f= s=10
+    r4c5 v="thick" f= s=11
+    r5c3 v="垂直居中" f= s=12
+    r5c4 v="删除线" f= s=13
+    r5c5 v="dashed" f= s=14
+    r6c4 v="红色18号" f= s=15
+    r6c5 v="dotted" f= s=16
+    r7c5 v="double" f= s=17
+    r8c5 v="hair" f= s=18
+    r9c5 v="dashDot" f= s=19
+    r10c5 v="mediumDashed" f= s=20
+    r11c0 v="FFFFF3C4" f= s=21
+    r12c0 v="FFFDE68A" f= s=22
+    r13c0 v="FFBBF7D0" f= s=23
+    r14c0 v="FFBFDBFE" f= s=24
+    r15c0 v="FFFECACA" f= s=25
+    r16c0 v="FFE9D5FF" f= s=26
+    r19c0 v="行高48" f= s=
+    r20c0 v="这行被隐藏" f= s=
+styles=[{"color":"#000000","fontSize":11,"fontFamily":"Calibri","numberFormat":"General"},{"bold":true,"color":"#1F2937","fontSize":16,"fontFamily":"微软雅黑","fill":"#DBEAFE","numberFormat":"General","horizontalAlign":"center","verticalAlign":"middle"},{"bold":true,"color":"#FFFFFF","fontSize":11,"fontFamily":"微软雅黑","fill":"#2563EB","border":{"left":{"style":"thin","color":"#1E40AF"},"right":{"style":"thin","color":"#1E40AF"},"top":{"style":"thin","color":"#1E40AF"},"bottom":{"style":"thin","color":"#1E40AF"}},"numberFormat":"General","horizontalAlign":"center","verticalAlign":"middle"},{"color":"#000000","fontSize":11,"fontFamily":"Calibri","numberFormat":"General","horizontalAlign":"left","verticalAlign":"top","textWrap":true},{"bold":true,"fontSize":11,"fontFamily":"微软雅黑","numberFormat":"General"},{"color":"#000000","fontSize":11,"fontFamily":"Calibri","border":{"left":{"style":"thin","color":"#DC2626"},"right":{"style":"thin","color":"#DC2626"},"top":{"style":"thin","color":"#DC2626"},"bottom":{"style":"thin","color":"#DC2626"}},"numberFormat":"General"},{"color":"#000000","fontSize":11,"fontFamily":"Calibri","numberFormat":"General","horizontalAlign":"left","indent":2},{"italic":true,"fontSize":11,"fontFamily":"微软雅黑","numberFormat":"General"},{"color":"#000000","fontSize":11,"fontFamily":"Calibri","border":{"left":{"style":"medium","color":"#DC2626"},"right":{"style":"medium","color":"#DC2626"},"top":{"style":"medium","color":"#DC2626"},"bottom":{"style":"medium","color":"#DC2626"}},"numberFormat":"General"},{"color":"#000000","fontSize":11,"fontFamily":"Calibri","numberFormat":"General","textRotation":45},{"underline":true,"fontSize":11,"fontFamily":"微软雅黑","numberFormat":"General"},{"color":"#000000","fontSize":11,"fontFamily":"Calibri","border":{"left":{"style":"thick","color":"#DC2626"},"right":{"style":"thick","color":"#DC2626"},"top":{"style":"thick","color":"#DC2626"},"bottom":{"style":"thick","color":"#DC2626"}},"numberFormat":"General"},{"color":"#000000","fontSize":11,"fontFamily":"Calibri","numberFormat":"General","horizontalAlign":"center","verticalAlign":"middle"},{"strikeThrough":true,"fontSize":11,"fontFamily":"微软雅黑","numberFormat":"General"},{"color":"#000000","fontSize":11,"fontFamily":"Calibri","border":{"left":{"style":"dashed","color":"#DC2626"},"right":{"style":"dashed","color":"#DC2626"},"top":{"style":"dashed","color":"#DC2626"},"bottom":{"style":"dashed","color":"#DC2626"}},"numberFormat":"General"},{"color":"#DC2626","fontSize":18,"fontFamily":"宋体","numberFormat":"General"},{"color":"#000000","fontSize":11,"fontFamily":"Calibri","border":{"left":{"style":"dotted","color":"#DC2626"},"right":{"style":"dotted","color":"#DC2626"},"top":{"style":"dotted","color":"#DC2626"},"bottom":{"style":"dotted","color":"#DC2626"}},"numberFormat":"General"},{"color":"#000000","fontSize":11,"fontFamily":"Calibri","border":{"left":{"style":"double","color":"#DC2626"},"right":{"style":"double","color":"#DC2626"},"top":{"style":"double","color":"#DC2626"},"bottom":{"style":"double","color":"#DC2626"}},"numberFormat":"General"},{"color":"#000000","fontSize":11,"fontFamily":"Calibri","border":{"left":{"style":"hair","color":"#DC2626"},"right":{"style":"hair","color":"#DC2626"},"top":{"style":"hair","color":"#DC2626"},"bottom":{"style":"hair","color":"#DC2626"}},"numberFormat":"General"},{"color":"#000000","fontSize":11,"fontFamily":"Calibri","border":{"left":{"style":"dashDot","color":"#DC2626"},"right":{"style":"dashDot","color":"#DC2626"},"top":{"style":"dashDot","color":"#DC2626"},"bottom":{"style":"dashDot","color":"#DC2626"}},"numberFormat":"General"},{"color":"#000000","fontSize":11,"fontFamily":"Calibri","border":{"left":{"style":"mediumDashed","color":"#DC2626"},"right":{"style":"mediumDashed","color":"#DC2626"},"top":{"style":"mediumDashed","color":"#DC2626"},"bottom":{"style":"mediumDashed","color":"#DC2626"}},"numberFormat":"General"},{"color":"#000000","fontSize":11,"fontFamily":"Calibri","fill":"#FFF3C4","numberFormat":"General"},{"color":"#000000","fontSize":11,"fontFamily":"Calibri","fill":"#FDE68A","numberFormat":"General"},{"color":"#000000","fontSize":11,"fontFamily":"Calibri","fill":"#BBF7D0","numberFormat":"General"},{"color":"#000000","fontSize":11,"fontFamily":"Calibri","fill":"#BFDBFE","numberFormat":"General"},{"color":"#000000","fontSize":11,"fontFamily":"Calibri","fill":"#FECACA","numberFormat":"General"},{"color":"#000000","fontSize":11,"fontFamily":"Calibri","fill":"#E9D5FF","numberFormat":"General"}]
+===== fixture-numfmt.xlsx =====
+
+--- sheet "数字格式" hidden=undefined veryHidden=undefined freeze=undefined grid=undefined defRowH=15 defColW=undefined dim={"startRow":0,"startCol":0,"endRow":17,"endCol":4}
+  cols={"0":{"width":20,"customWidth":true},"1":{"width":24,"customWidth":true},"2":{"width":34,"customWidth":true}}
+  rows={}
+  merges=[]
+    r0c0 v="原始值" f= s=1
+    r0c1 v="显示效果" f= s=1
+    r0c2 v="numFmt" f= s=1
+    r1c0 v=1234.5678 f= s=
+    r1c1 v=1234.5678 f= s=2
+    r1c2 v="#,##0.00" f= s=
+    r1c4 v="主题色 accent1" f= s=3
+    r2c0 v=-1234.5678 f= s=
+    r2c1 v=-1234.5678 f= s=4
+    r2c2 v="#,##0.00;[Red]-#,##0.00" f= s=
+    r3c0 v=0.2567 f= s=
+    r3c1 v=0.2567 f= s=5
+    r3c2 v="0.0%" f= s=
+    r4c0 v=0.2567 f= s=
+    r4c1 v=0.2567 f= s=6
+    r4c2 v="0.00%" f= s=
+    r5c0 v=45658 f= s=
+    r5c1 v=45658 f= s=7
+    r5c2 v="yyyy-mm-dd" f= s=
+    r6c0 v=45658 f= s=
+    r6c1 v=45658 f= s=8
+    r6c2 v="yyyy\"年\"m\"月\"d\"日\"" f= s=
+    r7c0 v=0.75 f= s=
+    r7c1 v=0.75 f= s=9
+    r7c2 v="h:mm AM/PM" f= s=
+    r8c0 v=1.5 f= s=
+    r8c1 v=1.5 f= s=10
+    r8c2 v="[h]:mm:ss" f= s=
+    r9c0 v=123456789 f= s=
+    r9c1 v=123456789 f= s=11
+    r9c2 v="0.00E+00" f= s=
+    r10c0 v=1234.5 f= s=
+    r10c1 v=1234.5 f= s=12
+    r10c2 v="¥#,##0.00" f= s=
+    r11c0 v=1234.5 f= s=
+    r11c1 v=1234.5 f= s=13
+    r11c2 v="\"总计 \"#,##0.00\" 元\"" f= s=
+    r12c0 v=12345 f= s=
+    r12c1 v=12345 f= s=14
+    r12c2 v="#,##0" f= s=
+    r13c0 v=1234.5678 f= s=
+    r13c1 v=1234.5678 f= s=15
+    r13c2 v="0.000" f= s=
+    r14c0 v=0.5 f= s=
+    r14c1 v=0.5 f= s=16
+    r14c2 v="# ?/?" f= s=
+    r15c0 v="00123" f= s=
+    r15c1 v="00123" f= s=17
+    r15c2 v="@" f= s=
+    r16c0 v=45658.5 f= s=
+    r16c1 v=45658.5 f= s=18
+    r16c2 v="m/d/yy h:mm" f= s=
+    r17c0 v=-0.1234 f= s=
+    r17c1 v=-0.1234 f= s=19
+    r17c2 v="0.00%;[Red]-0.00%" f= s=
+styles=[{"color":"#000000","fontSize":11,"fontFamily":"Calibri","numberFormat":"General"},{"bold":true,"numberFormat":"General"},{"color":"#000000","fontSize":11,"fontFamily":"Calibri","numberFormat":"#,##0.00"},{"color":"#376093","fontSize":11,"fontFamily":"微软雅黑","fill":"#C6CED8","numberFormat":"General"},{"color":"#000000","fontSize":11,"fontFamily":"Calibri","numberFormat":"#,##0.00;[Red]-#,##0.00"},{"color":"#000000","fontSize":11,"fontFamily":"Calibri","numberFormat":"0.0%"},{"color":"#000000","fontSize":11,"fontFamily":"Calibri","numberFormat":"0.00%"},{"color":"#000000","fontSize":11,"fontFamily":"Calibri","numberFormat":"yyyy-mm-dd"},{"color":"#000000","fontSize":11,"fontFamily":"Calibri","numberFormat":"yyyy\"年\"m\"月\"d\"日\""},{"color":"#000000","fontSize":11,"fontFamily":"Calibri","numberFormat":"h:mm AM/PM"},{"color":"#000000","fontSize":11,"fontFamily":"Calibri","numberFormat":"[h]:mm:ss"},{"color":"#000000","fontSize":11,"fontFamily":"Calibri","numberFormat":"0.00E+00"},{"color":"#000000","fontSize":11,"fontFamily":"Calibri","numberFormat":"¥#,##0.00"},{"color":"#000000","fontSize":11,"fontFamily":"Calibri","numberFormat":"\"总计 \"#,##0.00\" 元\""},{"color":"#000000","fontSize":11,"fontFamily":"Calibri","numberFormat":"#,##0"},{"color":"#000000","fontSize":11,"fontFamily":"Calibri","numberFormat":"0.000"},{"color":"#000000","fontSize":11,"fontFamily":"Calibri","numberFormat":"# ?/?"},{"color":"#000000","fontSize":11,"fontFamily":"Calibri","numberFormat":"@"},{"color":"#000000","fontSize":11,"fontFamily":"Calibri","numberFormat":"m/d/yy h:mm"},{"color":"#000000","fontSize":11,"fontFamily":"Calibri","numberFormat":"0.00%;[Red]-0.00%"}]
+===== fixture-rules.xlsx =====
+[条件格式] 有 1 块 x14 扩展条件格式（无 sqref 属性）暂不解析，已跳过
+--- sheet "条件格式" hidden=undefined veryHidden=undefined freeze=undefined grid=undefined defRowH=15 defColW=undefined dim={"startRow":0,"startCol":0,"endRow":5,"endCol":4}
+  cols={"0":{"width":16,"customWidth":true},"1":{"width":12,"customWidth":true},"2":{"width":12,"customWidth":true},"3":{"width":12,"customWidth":true},"4":{"width":16,"customWidth":true}}
+  rows={}
+  merges=[]
+    r0c0 v="项目" f= s=1
+    r0c1 v="高亮>100" f= s=1
+    r0c2 v="色阶" f= s=1
+    r0c3 v="数据条" f= s=1
+    r0c4 v="图标集" f= s=1
+    r1c0 v="甲" f= s=
+    r1c1 v=120 f= s=
+    r1c2 v=30 f= s=
+    r1c3 v=55 f= s=
+    r1c4 v=90 f= s=
+    r2c0 v="乙" f= s=
+    r2c1 v=80 f= s=
+    r2c2 v=55 f= s=
+    r2c3 v=40 f= s=
+    r2c4 v=70 f= s=
+    r3c0 v="丙" f= s=
+    r3c1 v=210 f= s=
+    r3c2 v=80 f= s=
+    r3c3 v=95 f= s=
+    r3c4 v=30 f= s=
+    r4c0 v="丁" f= s=
+    r4c1 v=45 f= s=
+    r4c2 v=12 f= s=
+    r4c3 v=20 f= s=
+    r4c4 v=55 f= s=
+    r5c0 v="戊" f= s=
+    r5c1 v=175 f= s=
+    r5c2 v=67 f= s=
+    r5c3 v=78 f= s=
+    r5c4 v=85 f= s=
+--- sheet "数据验证" hidden=undefined veryHidden=undefined freeze=undefined grid=undefined defRowH=15 defColW=undefined dim={"startRow":0,"startCol":0,"endRow":1,"endCol":4}
+  cols={}
+  rows={}
+  merges=[]
+    r0c0 v="性别(列表)" f= s=1
+    r0c1 v="年龄(整数1-120)" f= s=1
+    r0c2 v="比率(小数)" f= s=1
+    r0c3 v="日期(2020后)" f= s=1
+    r0c4 v="文本长度<=5" f= s=1
+    r1c0 v="男" f= s=
+    r1c1 v=30 f= s=
+    r1c2 v=0.5 f= s=
+    r1c3 v=45352 f= s=2
+    r1c4 v="abc" f= s=
+styles=[{"color":"#000000","fontSize":11,"fontFamily":"Calibri","numberFormat":"General"},{"bold":true,"numberFormat":"General"},{"color":"#000000","fontSize":11,"fontFamily":"Calibri","numberFormat":"m/d/yyyy"}]
+===== fixture-extras.xlsx =====
+
+--- sheet "批注链接图片" hidden=undefined veryHidden=undefined freeze=undefined grid=undefined defRowH=15 defColW=undefined dim={"startRow":0,"startCol":0,"endRow":10,"endCol":1}
+  cols={"0":{"width":20,"customWidth":true},"1":{"width":30,"customWidth":true},"2":{"width":20,"customWidth":true}}
+  rows={}
+  merges=[]
+    r0c0 v="带批注的单元格" f= s=
+    r0c1 v="示例链接" f= s=1
+    r1c0 v="多行批注" f= s=
+    r1c1 v="内部链接" f= s=
+    r2c1 v="邮件链接" f= s=
+    r5c0 v="图片在右侧 C5 附近（oneCell 锚点）" f= s=
+    r10c0 v="图片在右侧 C10 附近（twoCell 锚点）" f= s=
+styles=[{"color":"#000000","fontSize":11,"fontFamily":"Calibri","numberFormat":"General"},{"underline":true,"color":"#0563C1","numberFormat":"General"}]
+===== fixture-multi.xlsx =====
+
+--- sheet "第一张" hidden=undefined veryHidden=undefined freeze=undefined grid=undefined defRowH=15 defColW=undefined dim={"startRow":0,"startCol":0,"endRow":5,"endCol":0}
+  cols={}
+  rows={}
+  merges=[]
+    r0c0 v="工作表顺序与文件名不一致的样本" f= s=
+    r1c0 v=10 f= s=
+    r2c0 v=20 f= s=
+    r3c0 v=30 f=SUM(A2:A3) s=
+    r4c0 v=200 f=第二张!A2*2 s=
+    r5c0 v="跨表引用与公式缓存" f= s=
+--- sheet "第二张" hidden=undefined veryHidden=undefined freeze=undefined grid=undefined defRowH=15 defColW=undefined dim={"startRow":0,"startCol":0,"endRow":1,"endCol":2}
+  cols={}
+  rows={}
+  merges=[]
+    r0c0 v="第二张表" f= s=
+    r1c0 v=100 f= s=
+    r1c1 v=25 f=A2/4 s=
+    r1c2 v="大" f=IF(A2>50,"大","小") s=
+--- sheet "隐藏表" hidden=true veryHidden=undefined freeze=undefined grid=undefined defRowH=15 defColW=undefined dim={"startRow":0,"startCol":0,"endRow":0,"endCol":0}
+  cols={}
+  rows={}
+  merges=[]
+    r0c0 v="我是隐藏表" f= s=
+--- sheet "深度隐藏" hidden=true veryHidden=true freeze=undefined grid=undefined defRowH=15 defColW=undefined dim={"startRow":0,"startCol":0,"endRow":0,"endCol":0}
+  cols={}
+  rows={}
+  merges=[]
+    r0c0 v="我是深度隐藏表" f= s=
+styles=[{"color":"#000000","fontSize":11,"fontFamily":"Calibri","numberFormat":"General"}]

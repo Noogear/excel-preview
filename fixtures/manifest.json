@@ -1,0 +1,430 @@
+{
+  "fixture-styles.xlsx": {
+    "purpose": "边框/填充/字体/对齐/合并/行高列宽/隐藏/富文本",
+    "sheets": [
+      {
+        "name": "样式",
+        "frozen": {
+          "xSplit": 1,
+          "ySplit": 1
+        },
+        "hiddenRows": [
+          21
+        ],
+        "hiddenCols": [
+          8
+        ]
+      }
+    ],
+    "checks": [
+      {
+        "a1": "A1",
+        "expect": {
+          "merged": "A1:F1",
+          "bold": true,
+          "fontSize": 16,
+          "align": "center",
+          "fill": "#DBEAFE"
+        }
+      },
+      {
+        "a1": "A2",
+        "expect": {
+          "bold": true,
+          "color": "#FFFFFF",
+          "fill": "#2563EB",
+          "align": "center",
+          "border": "thin #1E40AF"
+        }
+      },
+      {
+        "a1": "F3",
+        "expect": {
+          "borderTop": "thin"
+        }
+      },
+      {
+        "a1": "F11",
+        "expect": {
+          "borderTop": "mediumDashed"
+        }
+      },
+      {
+        "a1": "D3",
+        "expect": {
+          "wrapText": true,
+          "verticalAlign": "top"
+        }
+      },
+      {
+        "a1": "D4",
+        "expect": {
+          "indent": 2
+        }
+      },
+      {
+        "a1": "D5",
+        "expect": {
+          "textRotation": 45
+        }
+      },
+      {
+        "a1": "E5",
+        "expect": {
+          "underline": true
+        }
+      },
+      {
+        "a1": "E6",
+        "expect": {
+          "strikeThrough": true
+        }
+      },
+      {
+        "a1": "F3",
+        "expect": {
+          "richText": true
+        },
+        "note": "P0 阶段降级为纯文本，P1 需还原"
+      },
+      {
+        "a1": "A20",
+        "expect": {
+          "rowHeight": 48
+        }
+      },
+      {
+        "a1": "G2",
+        "expect": {
+          "colWidth": 30
+        }
+      }
+    ]
+  },
+  "fixture-numfmt.xlsx": {
+    "purpose": "数字格式显示文本保真（含自定义与内置格式）",
+    "sheets": [
+      {
+        "name": "数字格式"
+      }
+    ],
+    "cases": [
+      {
+        "a1": "B2",
+        "value": 1234.5678,
+        "numFmt": "#,##0.00"
+      },
+      {
+        "a1": "B3",
+        "value": -1234.5678,
+        "numFmt": "#,##0.00;[Red]-#,##0.00"
+      },
+      {
+        "a1": "B4",
+        "value": 0.2567,
+        "numFmt": "0.0%"
+      },
+      {
+        "a1": "B5",
+        "value": 0.2567,
+        "numFmt": "0.00%"
+      },
+      {
+        "a1": "B6",
+        "value": 45658,
+        "numFmt": "yyyy-mm-dd"
+      },
+      {
+        "a1": "B7",
+        "value": 45658,
+        "numFmt": "yyyy\"年\"m\"月\"d\"日\""
+      },
+      {
+        "a1": "B8",
+        "value": 0.75,
+        "numFmt": "h:mm AM/PM"
+      },
+      {
+        "a1": "B9",
+        "value": 1.5,
+        "numFmt": "[h]:mm:ss"
+      },
+      {
+        "a1": "B10",
+        "value": 123456789,
+        "numFmt": "0.00E+00"
+      },
+      {
+        "a1": "B11",
+        "value": 1234.5,
+        "numFmt": "¥#,##0.00"
+      },
+      {
+        "a1": "B12",
+        "value": 1234.5,
+        "numFmt": "\"总计 \"#,##0.00\" 元\""
+      },
+      {
+        "a1": "B13",
+        "value": 12345,
+        "numFmt": "#,##0"
+      },
+      {
+        "a1": "B14",
+        "value": 1234.5678,
+        "numFmt": "0.000"
+      },
+      {
+        "a1": "B15",
+        "value": 0.5,
+        "numFmt": "# ?/?"
+      },
+      {
+        "a1": "B16",
+        "value": "00123",
+        "numFmt": "@"
+      },
+      {
+        "a1": "B17",
+        "value": 45658.5,
+        "numFmt": "m/d/yy h:mm"
+      },
+      {
+        "a1": "B18",
+        "value": -0.1234,
+        "numFmt": "0.00%;[Red]-0.00%"
+      }
+    ],
+    "themeColor": {
+      "a1": "E2",
+      "theme": 4,
+      "tint": -0.25
+    }
+  },
+  "fixture-rules.xlsx": {
+    "purpose": "条件格式四类 + 数据验证五类",
+    "sheets": [
+      {
+        "name": "条件格式"
+      },
+      {
+        "name": "数据验证"
+      }
+    ],
+    "conditionalFormatting": [
+      {
+        "ref": "B2:B6",
+        "kind": "cellIs-greaterThan-100",
+        "fill": "#FFC7CE",
+        "fontColor": "#9C0006"
+      },
+      {
+        "ref": "C2:C6",
+        "kind": "colorScale",
+        "colors": [
+          "#F8696B",
+          "#63BE7B"
+        ]
+      },
+      {
+        "ref": "D2:D6",
+        "kind": "dataBar",
+        "color": "#638EC6"
+      },
+      {
+        "ref": "E2:E6",
+        "kind": "iconSet",
+        "iconSet": "3TrafficLights1"
+      }
+    ],
+    "dataValidations": [
+      {
+        "a1": "A2",
+        "type": "list",
+        "formulae": "\"男,女,未知\""
+      },
+      {
+        "a1": "B2",
+        "type": "whole",
+        "operator": "between",
+        "formulae": [
+          1,
+          120
+        ]
+      },
+      {
+        "a1": "C2",
+        "type": "decimal",
+        "operator": "greaterThan",
+        "formulae": [
+          0
+        ]
+      },
+      {
+        "a1": "D2",
+        "type": "date",
+        "operator": "greaterThan"
+      },
+      {
+        "a1": "E2",
+        "type": "textLength",
+        "operator": "lessThanOrEqual",
+        "formulae": [
+          5
+        ]
+      }
+    ]
+  },
+  "fixture-extras.xlsx": {
+    "purpose": "批注、超链接、浮动图片",
+    "sheets": [
+      {
+        "name": "批注链接图片"
+      }
+    ],
+    "notes": [
+      {
+        "a1": "A1",
+        "text": "这是一条批注（legacy note）\n第二行"
+      },
+      {
+        "a1": "A2",
+        "text": "第一行\n第二行\n第三行"
+      }
+    ],
+    "hyperlinks": [
+      {
+        "a1": "B1",
+        "target": "https://example.com/path?q=1"
+      },
+      {
+        "a1": "B2",
+        "target": "#条件格式!A1",
+        "kind": "internal"
+      },
+      {
+        "a1": "B3",
+        "target": "mailto:test@example.com"
+      }
+    ],
+    "images": [
+      {
+        "index": 0,
+        "anchor": "oneCell",
+        "tl": {
+          "col": 2.2,
+          "row": 4.2
+        },
+        "size": {
+          "width": 128,
+          "height": 80
+        },
+        "color": "#2563EB"
+      },
+      {
+        "index": 1,
+        "anchor": "twoCell",
+        "tl": {
+          "col": 2.2,
+          "row": 9.2
+        },
+        "br": {
+          "col": 3.4,
+          "row": 11.4
+        },
+        "color": "#DC2626"
+      }
+    ]
+  },
+  "fixture-table.xlsx": {
+    "purpose": "Excel 表格(Table)：表头样式 + 斑马纹 + 汇总行（样式需实体化到单元格）",
+    "sheets": [
+      {
+        "name": "表格"
+      }
+    ],
+    "tables": [
+      {
+        "name": "SalesTable",
+        "ref": "A1:D5",
+        "style": "TableStyleMedium9",
+        "showRowStripes": true,
+        "totalsRow": false
+      },
+      {
+        "name": "TotalsTable",
+        "ref": "A8:C11",
+        "style": "TableStyleLight11",
+        "showRowStripes": true,
+        "totalsRow": true
+      }
+    ],
+    "note": "表格的斑马纹/表头样式**不在单元格样式里**，而是来自 tableStyles.xml —— 这正是需要\"实体化\"的地方"
+  },
+  "fixture-multi.xlsx": {
+    "purpose": "多工作表、顺序与文件名不一致、隐藏/深度隐藏、公式与缓存值",
+    "sheets": [
+      {
+        "name": "第一张",
+        "state": "visible",
+        "index": 0
+      },
+      {
+        "name": "第二张",
+        "state": "visible",
+        "index": 1
+      },
+      {
+        "name": "隐藏表",
+        "state": "hidden",
+        "index": 2
+      },
+      {
+        "name": "深度隐藏",
+        "state": "veryHidden",
+        "index": 3
+      }
+    ],
+    "formulas": [
+      {
+        "sheet": "第一张",
+        "a1": "A4",
+        "formula": "SUM(A2:A3)",
+        "cached": 30
+      },
+      {
+        "sheet": "第一张",
+        "a1": "A5",
+        "formula": "第二张!A2*2",
+        "cached": 200
+      },
+      {
+        "sheet": "第二张",
+        "a1": "B2",
+        "formula": "A2/4",
+        "cached": 25
+      },
+      {
+        "sheet": "第二张",
+        "a1": "C2",
+        "formula": "IF(A2>50,\"大\",\"小\")",
+        "cached": "大"
+      }
+    ],
+    "note": "导入时默认采用 Excel 缓存值渲染，保证与 Excel 显示一致"
+  },
+  "fixture-macro.xlsm": {
+    "purpose": "启用宏的工作簿：能被打开预览；xl/vbaProject.bin 原样保留（不执行）",
+    "sheets": [
+      {
+        "name": "宏工作簿",
+        "state": "visible",
+        "index": 0
+      }
+    ],
+    "preserved": [
+      "宏(VBA)"
+    ],
+    "note": "vbaProject.bin 是占位字节（不解析、不执行），导出时逐字节保留"
+  }
+}

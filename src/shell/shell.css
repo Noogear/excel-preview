@@ -1,0 +1,770 @@
+/* ============================================================================
+   外壳设计系统：统一色板 / 圆角 / 阴影 / 动效，浅色为默认，深色跟随系统。
+   组件内部样式（工作区卡片等）由各自 CSS 负责，这里只管外壳与通用控件。
+   ========================================================================== */
+
+:root {
+  color-scheme: light dark;
+
+  --bg: #eef1f6;
+  --bg-grad: radial-gradient(1200px 600px at 15% -10%, #ffffff 0%, #eef1f6 55%, #e6ebf3 100%);
+  --panel: #ffffff;
+  --panel-soft: #f8fafc;
+  --border: #e2e6ee;
+  --border-strong: #cfd6e4;
+  --text: #16203a;
+  --text-muted: #667089;
+  --primary: #2563eb;
+  --primary-soft: #e8efff;
+  --ok: #0f9d58;
+  --ok-soft: #e6f6ec;
+  --warn: #b45309;
+  --warn-soft: #fff4e5;
+  --danger: #dc2626;
+  --danger-soft: #fee2e2;
+
+  --radius-sm: 6px;
+  --radius: 10px;
+  --radius-lg: 14px;
+
+  --shadow-1: 0 1px 2px rgba(16, 24, 40, 0.06);
+  --shadow-2: 0 4px 14px rgba(16, 24, 40, 0.08);
+  --shadow-3: 0 18px 40px rgba(16, 24, 40, 0.16);
+
+  /* 顶栏高度 = 图标工具栏高度（48px），避免网格行多出空隙 */
+  --topbar-h: 48px;
+  --statusbar-h: 34px;
+  /* 提示层要压过 Univer 的弹层（上游 popup z-index 到 1070），否则会被遮住 */
+  --z-prompt: 3000;
+  --z-menu: 3200;
+  --z-dialog: 3400;
+  --sidebar-w: 268px;
+
+  --ease: cubic-bezier(0.22, 0.61, 0.36, 1);
+  --dur-fast: 140ms;
+  --dur: 220ms;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0f1420;
+    --bg-grad: radial-gradient(1200px 600px at 15% -10%, #1a2233 0%, #121826 55%, #0d121c 100%);
+    --panel: #161d2c;
+    --panel-soft: #1b2333;
+    --border: #262f42;
+    --border-strong: #33405a;
+    --text: #e6ebf5;
+    --text-muted: #94a0b8;
+    --primary: #6098ff;
+    --primary-soft: #1d2c4d;
+    --ok-soft: #14301f;
+    --warn-soft: #33260f;
+    --danger-soft: #3a1618;
+    --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
+    --shadow-2: 0 4px 14px rgba(0, 0, 0, 0.45);
+    --shadow-3: 0 18px 40px rgba(0, 0, 0, 0.55);
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font-family: 'Microsoft YaHei', 'PingFang SC', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  font-size: 13px;
+  color: var(--text);
+  background: var(--bg-grad);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ---------------------------------------------------------------- 布局 */
+.app {
+  display: grid;
+  grid-template-rows: var(--topbar-h) 1fr var(--statusbar-h);
+  height: 100%;
+  min-height: 0;
+}
+
+.app.is-dragging {
+  cursor: grabbing;
+  user-select: none;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 14px;
+  background: color-mix(in srgb, var(--panel) 88%, transparent);
+  backdrop-filter: saturate(1.4) blur(8px);
+  border-bottom: 1px solid var(--border);
+  z-index: 20;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.brand-mark {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 9px;
+  background: linear-gradient(140deg, var(--primary), #7c3aed);
+  color: #fff;
+  font-weight: 700;
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  box-shadow: var(--shadow-1);
+}
+
+.brand-text {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.2;
+  min-width: 0;
+}
+
+.brand-text strong {
+  font-size: 13px;
+}
+
+.brand-text span {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.toolbar-group {
+  display: flex;
+  gap: 6px;
+}
+
+.toolbar-spacer {
+  flex: 1;
+}
+
+.sheet-tabs {
+  display: flex;
+  gap: 4px;
+  max-width: 34vw;
+  overflow-x: auto;
+  padding: 2px;
+  scrollbar-width: thin;
+}
+
+.sheet-tab {
+  font: inherit;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+}
+
+.sheet-tab:hover {
+  background: var(--panel-soft);
+  color: var(--text);
+}
+
+.sheet-tab.is-active {
+  background: var(--primary-soft);
+  border-color: color-mix(in srgb, var(--primary) 35%, transparent);
+  color: var(--primary);
+  font-weight: 600;
+}
+
+/* ---------------------------------------------------------------- 按钮 */
+.btn {
+  font: inherit;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-strong);
+  background: var(--panel);
+  color: var(--text);
+  cursor: pointer;
+  box-shadow: var(--shadow-1);
+  transition: transform var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease), background var(--dur-fast) var(--ease);
+}
+
+.btn:hover {
+  border-color: var(--primary);
+  color: var(--primary);
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-2);
+}
+
+.btn:active {
+  transform: translateY(0);
+  box-shadow: var(--shadow-1);
+}
+
+.btn.primary {
+  background: linear-gradient(180deg, color-mix(in srgb, var(--primary) 92%, #fff), var(--primary));
+  border-color: transparent;
+  color: #fff;
+}
+
+.btn.primary:hover {
+  color: #fff;
+  filter: brightness(1.05);
+}
+
+.btn.ghost {
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
+}
+
+.btn.ghost:hover {
+  background: var(--panel-soft);
+}
+
+.btn.ghost.is-active {
+  background: var(--primary-soft);
+  color: var(--primary);
+}
+
+.file-btn {
+  position: relative;
+  overflow: hidden;
+}
+
+.file-btn input {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.file-btn.is-busy {
+  opacity: 0.7;
+  pointer-events: none;
+}
+
+/* ---------------------------------------------------------------- 主体 */
+.body {
+  display: grid;
+  /* 表格区 | 分隔条 | 工作区：分隔条可拖动，同时改变表格区与工作区宽度 */
+  grid-template-columns: 1fr 8px var(--sidebar-w);
+  gap: 6px;
+  padding: 10px;
+  min-height: 0;
+}
+
+/* 拖动分隔条调整工作区宽度（往左拖变宽） */
+.body-splitter {
+  position: relative;
+  align-self: stretch;
+  border-radius: 999px;
+  cursor: col-resize;
+  background: transparent;
+  transition: background 120ms ease;
+}
+
+.body-splitter::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 2px;
+  height: 46px;
+  transform: translate(-50%, -50%);
+  border-radius: 999px;
+  background: var(--border);
+  transition: background 120ms ease, height 120ms ease;
+}
+
+.body-splitter:hover::after,
+.body-splitter:active::after {
+  height: 72px;
+  background: var(--accent, #2563eb);
+}
+
+.body-splitter:hover {
+  background: color-mix(in srgb, var(--accent, #2563eb) 8%, transparent);
+}
+
+.stage {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-2);
+  overflow: hidden;
+}
+
+#univer-container {
+  width: 100%;
+  height: 100%;
+}
+
+/* ---------------------------------------------------------------- 互换提醒框
+ * 互换完成后把刚换过的两格用**黄色**框出来，并**逐渐透明消失**（用户明确要求）。
+ * 关键两点：
+ *  - `pointer-events: none`：整层穿透，绝不吃鼠标事件（"不影响操作"是结构性保证）；
+ *  - 只做 opacity 动画（合成器合成），不重绘 Univer 画布，大表下也不掉帧。
+ * 位置由 JS 每帧写入 transform/宽高（滚动、缩放时跟随）。
+ */
+.swap-flash-layer {
+  position: fixed;
+  inset: 0;
+  z-index: calc(var(--z-prompt) + 1);
+  pointer-events: none;
+}
+
+.swap-flash-box {
+  position: absolute;
+  top: 0;
+  left: 0;
+  box-sizing: border-box;
+  border: 2px solid #facc15;
+  border-radius: 3px;
+  background: rgba(250, 204, 21, 0.16);
+  box-shadow: 0 0 0 1px rgba(250, 204, 21, 0.35) inset;
+  will-change: opacity;
+  animation-name: swap-flash-fade;
+  animation-timing-function: ease-out;
+  animation-fill-mode: forwards;
+}
+
+@keyframes swap-flash-fade {
+  0% {
+    opacity: 1;
+  }
+  35% {
+    opacity: 0.85;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .swap-flash-box {
+    animation-name: none;
+    opacity: 0.9;
+  }
+}
+
+/* ------------------------------------------------------- 滚动条抓取高亮
+ * 用户反馈"滚动条很难用"：一是命中区太窄，二是拖起来没有反馈。
+ * 命中区已在 JS 里放宽（±8px 容差）；这里给拖动过程加一条可视高亮（穿透、不吃事件）。
+ */
+.scrollbar-grab {
+  z-index: calc(var(--z-prompt) + 2);
+  pointer-events: none;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--primary) 16%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--primary) 45%, transparent);
+}
+
+.scrollbar-grab-thumb {
+  width: 100%;
+  height: 100%;
+}
+
+/* 竖向：只在指针那一列显示一条竖带；横向：指针那一行显示一条横带 */
+.scrollbar-grab[data-axis='y'] {
+  background: none;
+  box-shadow: none;
+  border-left: 2px solid color-mix(in srgb, var(--primary) 55%, transparent);
+}
+
+.scrollbar-grab[data-axis='x'] {
+  background: none;
+  box-shadow: none;
+  border-top: 2px solid color-mix(in srgb, var(--primary) 55%, transparent);
+}
+
+/* 悬停（还没按下）：更淡、虚线，表示"这里可以抓" */
+.scrollbar-grab.is-hover {
+  opacity: 0.55;
+  border-left-style: dashed;
+  border-top-style: dashed;
+}
+
+/* ------------------------------------------------------- 文件拖放提示
+ * 把 xlsx 拖到窗口上时显示（应用文案一直写着"拖入 xlsx"，以前却没有接拖放）。
+ */
+.file-drop-overlay {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  z-index: calc(var(--z-prompt) - 10);
+  pointer-events: none;
+  background: color-mix(in srgb, var(--primary) 10%, transparent);
+  backdrop-filter: blur(2px);
+}
+
+.file-drop-card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  align-items: center;
+  padding: 14px 22px;
+  border-radius: 12px;
+  border: 1px dashed color-mix(in srgb, var(--primary) 60%, transparent);
+  background: color-mix(in srgb, var(--panel) 94%, transparent);
+  box-shadow: var(--shadow-3);
+  color: var(--text);
+}
+
+.file-drop-card strong {
+  font-size: 14px;
+}
+
+.file-drop-card span {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+/* ------------------------------------------------------- 拖动落点高亮（拖动中常亮）
+ * 拖动单元格时，把"即将被交换/写入"的那一格高亮出来（用户明确要求）。
+ * 同样是穿透浮层、不重绘画布；松手或取消时由 JS 收掉。
+ */
+.drag-target-layer {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-prompt);
+  pointer-events: none;
+}
+
+.drag-target-box {
+  position: absolute;
+  top: 0;
+  left: 0;
+  box-sizing: border-box;
+  border: 2px dashed #2563eb;
+  border-radius: 3px;
+  background: rgba(37, 99, 235, 0.14);
+}
+
+/* 落点无效（重叠/越界）时换成红色警示 */
+.drag-target-box.is-reject {
+  border-color: #dc2626;
+  background: rgba(220, 38, 38, 0.12);
+}
+
+.stage-overlay {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: color-mix(in srgb, var(--panel) 82%, transparent);
+  color: var(--text-muted);
+  font-size: 13px;
+  backdrop-filter: blur(2px);
+}
+
+.workspace-host {
+  min-height: 0;
+  /* 允许随列收缩（否则内容宽度会反过来把 --sidebar-w 那一列撑宽，拖拽改宽度会失真） */
+  min-width: 0;
+  overflow: hidden;
+  display: flex;
+}
+
+/* 拖动时舞台高亮一圈，明确"可放置区域" */
+.app.is-dragging .stage {
+  border-color: color-mix(in srgb, var(--primary) 55%, transparent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 18%, transparent), var(--shadow-2);
+}
+
+.drag-hint {
+  position: absolute;
+  /* 放在底部：顶部被公式栏占用，放上面会互相压住 */
+  bottom: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 6px 14px;
+  border-radius: 999px;
+  font-size: 12px;
+  background: var(--primary-soft);
+  color: var(--primary);
+  border: 1px solid color-mix(in srgb, var(--primary) 35%, transparent);
+  box-shadow: var(--shadow-2);
+  backdrop-filter: blur(6px);
+  pointer-events: none;
+  animation: hint-in var(--dur) var(--ease);
+}
+
+.drag-hint.hint-swap {
+  background: var(--ok-soft);
+  color: var(--ok);
+  border-color: color-mix(in srgb, var(--ok) 40%, transparent);
+}
+
+.drag-hint.hint-reject {
+  background: var(--danger-soft);
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 40%, transparent);
+}
+
+@keyframes hint-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -6px);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+}
+
+/* ---------------------------------------------------------------- 状态栏 */
+.statusbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 12px;
+  border-top: 1px solid var(--border);
+  background: color-mix(in srgb, var(--panel) 86%, transparent);
+  font-size: 11.5px;
+  color: var(--text-muted);
+  overflow: hidden;
+}
+
+.statusbar-spacer {
+  flex: 1;
+}
+
+.chip {
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--panel-soft);
+  border: 1px solid var(--border);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 46vw;
+}
+
+.chip.warn {
+  background: var(--warn-soft);
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 30%, transparent);
+}
+
+.status-text {
+  max-width: 40vw;
+}
+
+/* ---------------------------------------------------------------- 日志抽屉 */
+.drawer {
+  position: fixed;
+  left: 10px;
+  right: 10px;
+  bottom: calc(var(--statusbar-h) + 8px);
+  height: 300px;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-3);
+  overflow: hidden;
+  z-index: 30;
+  animation: drawer-in var(--dur) var(--ease);
+}
+
+@keyframes drawer-in {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.drawer-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-muted);
+}
+
+.drawer-head strong {
+  color: var(--text);
+}
+
+.drawer-head .btn {
+  height: 26px;
+  padding: 0 8px;
+}
+
+.import-summary {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel-soft);
+  max-height: 120px;
+  overflow: auto;
+  font-size: 12px;
+}
+
+.summary-block {
+  margin-top: 6px;
+}
+
+.summary-block em {
+  color: var(--text-muted);
+  font-style: normal;
+}
+
+.summary-block ul {
+  margin: 2px 0 0;
+  padding-left: 16px;
+  color: var(--warn);
+}
+
+.log-list {
+  flex: 1;
+  overflow: auto;
+  margin: 0;
+  padding: 6px 12px;
+  list-style: none;
+  font-family: Consolas, 'Cascadia Mono', ui-monospace, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.log-list li {
+  display: flex;
+  gap: 8px;
+  border-bottom: 1px dashed color-mix(in srgb, var(--border) 70%, transparent);
+  padding: 1px 0;
+}
+
+.log-list .t {
+  flex: 0 0 52px;
+  text-align: right;
+  color: var(--text-muted);
+}
+
+.log-list .kind {
+  flex: 0 0 auto;
+  color: var(--primary);
+}
+
+.log-list .detail {
+  color: var(--text-muted);
+  word-break: break-all;
+}
+
+/* ---------------------------------------------------------------- 提示（统一层）
+ * 用户反馈："提示有多个组件、风格不统一、位置不统一，而且没在最上层会被遮挡"。
+ * 所以：**所有瞬时提示（拖动提示 + 轻提示）都渲染进同一个 `prompt-layer`**，
+ * 同一位置（表格区域底部居中）、同一套视觉（同一 padding/圆角/字号/阴影/语义色），
+ * 并用 `--z-prompt` 压过 Univer 的弹层（它的 popup z-index 到 1070）。
+ */
+.prompt-layer {
+  position: fixed;
+  left: 0;
+  right: var(--sidebar-w);
+  bottom: calc(var(--statusbar-h) + 12px);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  z-index: var(--z-prompt);
+  pointer-events: none;
+}
+
+.prompt {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: min(560px, 70vw);
+  padding: 7px 14px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--primary);
+  background: color-mix(in srgb, var(--panel) 92%, transparent);
+  color: var(--text);
+  font-size: 12.5px;
+  line-height: 1.4;
+  box-shadow: var(--shadow-3);
+  backdrop-filter: blur(8px);
+  animation: prompt-in var(--dur) var(--ease);
+}
+
+/* 拖动中的提示：语义色描边（互换=绿、写入=蓝、落到工作区=主色、无效=红） */
+.prompt.is-ok {
+  border-left-color: var(--ok);
+}
+
+.prompt.is-warn {
+  border-left-color: var(--warn);
+}
+
+.prompt.is-danger {
+  border-left-color: var(--danger);
+}
+
+@keyframes prompt-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* 拖拽幽灵：位置由 JS 的 transform 控制，这里只兜底视觉 */
+.ghost-content {
+  font-family: 'Microsoft YaHei', system-ui, sans-serif;
+}
+
+/* ---------------------------------------------------------------- 无障碍 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+
+  .btn:hover {
+    transform: none;
+  }
+}

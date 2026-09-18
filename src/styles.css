@@ -1,0 +1,249 @@
+/* P0 验证台样式：只为看清"预览区 / 工作区侧栏 / 事件日志"三块，正式 UI 在 P1 重做 */
+:root {
+  color-scheme: light;
+  --bg: #f6f7f9;
+  --panel: #ffffff;
+  --border: #e3e6ea;
+  --text: #1f2937;
+  --muted: #6b7280;
+  --accent: #2563eb;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font-family: 'Microsoft YaHei', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 13px;
+}
+
+.p0-app {
+  display: grid;
+  grid-template-columns: 220px 1fr 360px;
+  grid-template-rows: 44px 1fr;
+  height: 100%;
+  gap: 8px;
+  padding: 8px;
+}
+
+.p0-header {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0 12px;
+}
+
+.p0-header h1 {
+  font-size: 14px;
+  margin: 0;
+  font-weight: 600;
+}
+
+.p0-header .spacer {
+  flex: 1;
+}
+
+.p0-badge {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.panel > h2 {
+  font-size: 12px;
+  margin: 0;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  color: var(--muted);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+/* 工作区侧栏（P0 只为验证 HTML5 拖放） */
+.workspace {
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow: auto;
+}
+
+.workspace-chip {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #fbfcfe;
+  padding: 6px 8px;
+  cursor: grab;
+  user-select: none;
+  box-shadow: 0 1px 2px rgb(16 24 40 / 6%);
+}
+
+.workspace-chip:active {
+  cursor: grabbing;
+}
+
+.workspace-chip strong {
+  display: block;
+  font-size: 12px;
+  margin-bottom: 2px;
+}
+
+.workspace-chip span {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+/* 预览区 */
+#univer-container {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+}
+
+.boot-status {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+  pointer-events: none;
+}
+
+/* 事件日志 */
+.log-list {
+  flex: 1;
+  overflow: auto;
+  margin: 0;
+  padding: 6px 8px;
+  list-style: none;
+  font-family: Consolas, 'Cascadia Mono', monospace;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.log-list li {
+  display: flex;
+  gap: 6px;
+  border-bottom: 1px dashed #eef0f3;
+  padding: 1px 0;
+  word-break: break-all;
+}
+
+.log-list .t {
+  color: #9aa3af;
+  flex: 0 0 52px;
+  text-align: right;
+}
+
+.log-list .kind {
+  color: #1d4ed8;
+}
+
+.log-list .kind.is-gesture {
+  color: #b45309;
+  font-weight: 600;
+}
+
+.log-list .kind.is-lock {
+  color: #047857;
+  font-weight: 600;
+}
+
+.log-list .detail {
+  color: var(--muted);
+}
+
+.toolbar-actions {
+  display: flex;
+  gap: 6px;
+  padding: 8px;
+  border-top: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+
+.file-input {
+  position: relative;
+  overflow: hidden;
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 12px;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  color: var(--accent);
+  cursor: pointer;
+  background: #fff;
+}
+
+.file-input input {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.import-summary {
+  border-top: 1px solid var(--border);
+  padding: 8px 10px;
+  overflow: auto;
+  max-height: 45%;
+  font-size: 12px;
+}
+
+.import-summary h3,
+.import-summary h4 {
+  margin: 6px 0 4px;
+  font-size: 12px;
+}
+
+.import-summary p {
+  margin: 2px 0;
+  color: var(--muted);
+}
+
+.import-summary ul {
+  margin: 0;
+  padding-left: 16px;
+  color: #b45309;
+}
+
+.import-summary li {
+  margin: 1px 0;
+}
+
+button {
+  font: inherit;
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: #fff;
+  cursor: pointer;
+}
+
+button:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}

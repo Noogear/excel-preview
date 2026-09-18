@@ -1,0 +1,526 @@
+/* ============================================================================
+   「导入到工作区」对话框（ImportDialog）
+   ----------------------------------------------------------------------------
+   - 只新增 `.imp-*` 类，不改外壳已有类；所有颜色 / 圆角 / 阴影 / 过渡都走
+     外壳令牌（`var(--panel, …)` 形式），因此深色模式由 shell.css 的
+     prefers-color-scheme 自动接管，本文件不重复实现主题切换；
+   - 变量分两层，和 workspace.css 同一套写法：
+       ① --imp-fb-*（兜底色板）：外壳缺席时也不出现"透明字 / 无边框"；
+       ② --imp-*（对外令牌）：优先 `var(--外壳令牌, var(--imp-fb-*))`；
+   - 唯一不走外壳令牌的是遮罩底色 --imp-scrim：外壳没有"遮罩"语义的令牌，
+     遮罩在浅色/深色下都必须往暗里压，故用固定半透明深色（两套主题各一档）；
+   - 关键数值：对话框宽 460 / 圆角 14 / 主按钮高 30 / 输入框高 30。
+   ========================================================================== */
+
+:where(.imp-overlay, .imp-overlay *) {
+  box-sizing: border-box;
+}
+
+/* 1. 设计令牌（浅色兜底 + 引用外壳令牌） ----------------------------------- */
+.imp-overlay {
+  /* ① 兜底色板 */
+  --imp-fb-panel: #ffffff;
+  --imp-fb-panel-soft: #f8fafc;
+  --imp-fb-text: #16203a;
+  --imp-fb-muted: #667089;
+  --imp-fb-border: #e2e6ee;
+  --imp-fb-border-strong: #cfd6e4;
+  --imp-fb-primary: #2563eb;
+  --imp-fb-primary-soft: #e8efff;
+  --imp-fb-danger: #dc2626;
+  --imp-fb-danger-soft: #fee2e2;
+  --imp-fb-shadow-1: 0 1px 2px rgb(16 24 40 / 6%);
+  --imp-fb-shadow-2: 0 4px 14px rgb(16 24 40 / 8%);
+  --imp-fb-shadow-3: 0 18px 40px rgb(16 24 40 / 16%);
+
+  /* ② 对外令牌：外壳在就用外壳的（改主题只改一处） */
+  --imp-panel: var(--panel, var(--imp-fb-panel));
+  --imp-panel-soft: var(--panel-soft, var(--imp-fb-panel-soft));
+  --imp-text: var(--text, var(--imp-fb-text));
+  --imp-muted: var(--text-muted, var(--imp-fb-muted));
+  --imp-border: var(--border, var(--imp-fb-border));
+  --imp-border-strong: var(--border-strong, var(--imp-fb-border-strong));
+  --imp-primary: var(--primary, var(--imp-fb-primary));
+  --imp-primary-soft: var(--primary-soft, var(--imp-fb-primary-soft));
+  --imp-danger: var(--danger, var(--imp-fb-danger));
+  --imp-danger-soft: var(--danger-soft, var(--imp-fb-danger-soft));
+  --imp-radius-sm: var(--radius-sm, 6px);
+  --imp-radius: var(--radius, 10px);
+  --imp-radius-lg: var(--radius-lg, 14px);
+  --imp-shadow-1: var(--shadow-1, var(--imp-fb-shadow-1));
+  --imp-shadow-2: var(--shadow-2, var(--imp-fb-shadow-2));
+  --imp-shadow-3: var(--shadow-3, var(--imp-fb-shadow-3));
+  --imp-dur: var(--dur-fast, 140ms);
+  --imp-dur-slow: var(--dur, 220ms);
+  --imp-ease: var(--ease, cubic-bezier(0.22, 0.61, 0.36, 1));
+  --imp-font-mono: Consolas, 'Cascadia Mono', ui-monospace, monospace;
+  /* 遮罩：外壳无对应令牌，浅色下 42% 已足够压暗（见文件头注释） */
+  --imp-scrim: rgb(11 18 32 / 42%);
+}
+
+/* 2. 深色兜底：只改兜底色板 ①（外壳加载时由 shell.css 的深色令牌说了算） --- */
+@media (prefers-color-scheme: dark) {
+  .imp-overlay {
+    --imp-fb-panel: #161d2c;
+    --imp-fb-panel-soft: #1b2333;
+    --imp-fb-text: #e6ebf5;
+    --imp-fb-muted: #94a0b8;
+    --imp-fb-border: #262f42;
+    --imp-fb-border-strong: #33405a;
+    --imp-fb-primary: #6098ff;
+    --imp-fb-primary-soft: #1d2c4d;
+    --imp-fb-danger: #f87171;
+    --imp-fb-danger-soft: #3a1618;
+    --imp-fb-shadow-1: 0 1px 2px rgb(0 0 0 / 40%);
+    --imp-fb-shadow-2: 0 4px 14px rgb(0 0 0 / 45%);
+    --imp-fb-shadow-3: 0 18px 40px rgb(0 0 0 / 55%);
+    --imp-scrim: rgb(0 0 0 / 58%);
+  }
+}
+
+/* 3. 遮罩 ---------------------------------------------------------------- */
+/* z-index：统一用外壳的层级变量（要压过 Univer 的弹层，它到 1070；见 shell.css） */
+.imp-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-dialog, 3400);
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  background: var(--imp-scrim);
+  backdrop-filter: blur(2px);
+  overscroll-behavior: contain;
+  animation: imp-fade var(--imp-dur-slow) var(--imp-ease);
+}
+
+/* 4. 对话框本体 ----------------------------------------------------------- */
+.imp-dialog {
+  display: flex;
+  flex-direction: column;
+  width: min(460px, 100%);
+  max-height: calc(100vh - 32px);
+  overflow: hidden;
+  border: 1px solid var(--imp-border);
+  border-radius: var(--imp-radius-lg);
+  background: var(--imp-panel);
+  color: var(--imp-text);
+  font-size: 13px;
+  line-height: 1.4;
+  box-shadow: var(--imp-shadow-3);
+  animation: imp-pop var(--imp-dur-slow) var(--imp-ease);
+}
+
+.imp-dialog[aria-busy='true'] {
+  cursor: progress;
+}
+
+/* 5. 头部 ---------------------------------------------------------------- */
+.imp-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 14px 10px;
+  border-bottom: 1px solid var(--imp-border);
+}
+
+.imp-head-text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.imp-title {
+  margin: 0;
+  font-size: 13.5px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.imp-subtitle {
+  margin: 2px 0 0;
+  color: var(--imp-muted);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+/* 工作表名可能很长：加粗 + 允许换行，不撑破对话框 */
+.imp-sheet {
+  color: var(--imp-text);
+  font-weight: 600;
+  word-break: break-all;
+}
+
+.imp-icon-btn {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--imp-muted);
+  font: inherit;
+  line-height: 1;
+  cursor: pointer;
+  transition: color var(--imp-dur) var(--imp-ease), background-color var(--imp-dur) var(--imp-ease),
+    border-color var(--imp-dur) var(--imp-ease);
+}
+
+.imp-icon-btn:hover:not(:disabled) {
+  border-color: var(--imp-border-strong);
+  background: var(--imp-panel-soft);
+  color: var(--imp-text);
+}
+
+.imp-icon-btn:focus-visible {
+  outline: 2px solid var(--imp-primary);
+  outline-offset: 1px;
+}
+
+.imp-icon-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* 6. 表单主体 ------------------------------------------------------------- */
+.imp-form {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.imp-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px;
+  overflow: auto;
+}
+
+/* 7. 输入框 / 识别行 / 错误 / 提示 ----------------------------------------- */
+.imp-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.imp-label {
+  color: var(--imp-muted);
+  font-size: 11.5px;
+}
+
+.imp-input {
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--imp-border-strong);
+  border-radius: var(--imp-radius-sm);
+  background: var(--imp-panel);
+  color: var(--imp-text);
+  font: inherit;
+  /* A1 记号用等宽字体：B 与 8、I 与 l 不容易看串 */
+  font-family: var(--imp-font-mono);
+  letter-spacing: 0.02em;
+  transition: border-color var(--imp-dur) var(--imp-ease), box-shadow var(--imp-dur) var(--imp-ease);
+}
+
+.imp-input::placeholder {
+  color: var(--imp-muted);
+  font-family: var(--imp-font-mono);
+  opacity: 0.85;
+}
+
+/* 文本输入框用 :focus（不是 :focus-visible）：鼠标点进来也要看得见落点 */
+.imp-input:focus {
+  border-color: var(--imp-primary);
+  outline: none;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--imp-primary) 18%, transparent);
+}
+
+.imp-input:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* 非法：红色描边（错误文案在 .imp-error 里） */
+.imp-input.is-invalid {
+  border-color: var(--imp-danger);
+}
+
+.imp-input.is-invalid:focus {
+  border-color: var(--imp-danger);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--imp-danger) 20%, transparent);
+}
+
+/* 错误文案槽位：始终占位（min-height），避免"出现错误时整块往下跳" */
+.imp-error {
+  margin: 0;
+  min-height: 15px;
+  color: var(--imp-danger);
+  font-size: 11.5px;
+  line-height: 1.3;
+}
+
+.imp-hint {
+  margin: 0;
+  color: var(--imp-muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+/* 8. 快捷填范围（当前选区 / 整个已用区域） --------------------------------- */
+.imp-quick {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.imp-quick-btn {
+  flex: 0 1 auto;
+  height: 26px;
+  max-width: 100%;
+  font-size: 11.5px;
+}
+
+.imp-sel-value {
+  max-width: 12em;
+  padding: 1px 6px;
+  overflow: hidden;
+  border: 1px solid var(--imp-border);
+  border-radius: 4px;
+  background: var(--imp-panel-soft);
+  color: var(--imp-text);
+  font-family: var(--imp-font-mono);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.imp-sel-value.is-empty {
+  border-style: dashed;
+  color: var(--imp-muted);
+}
+
+/* 9. 实时预览（替代原来那个不可点的"跳过空单元格"） ------------------------ */
+/* 空态是虚线灰底（"这里会有东西"），就绪后变实线浅蓝底（"这就是会发生的事"） */
+.imp-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border: 1px dashed var(--imp-border-strong);
+  border-radius: var(--imp-radius-sm);
+  background: var(--imp-panel-soft);
+}
+
+.imp-preview.is-ready {
+  border-style: solid;
+  border-color: color-mix(in srgb, var(--imp-primary) 35%, var(--imp-border));
+  background: color-mix(in srgb, var(--imp-primary-soft) 70%, var(--imp-panel));
+}
+
+.imp-preview-line {
+  margin: 0;
+  color: var(--imp-muted);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.imp-preview.is-ready .imp-preview-line {
+  color: var(--imp-text);
+  font-weight: 600;
+}
+
+.imp-preview-samples {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+/* 样例格子：A1 记号 + 内容。内容可能很长（备注、地址），一律截断 */
+.imp-sample {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  max-width: 100%;
+  padding: 1px 6px;
+  overflow: hidden;
+  border: 1px solid var(--imp-border);
+  border-radius: 4px;
+  background: var(--imp-panel);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.imp-sample-a1 {
+  color: var(--imp-muted);
+  font-family: var(--imp-font-mono);
+  font-size: 10.5px;
+}
+
+.imp-sample-more {
+  align-self: center;
+  color: var(--imp-muted);
+  font-size: 11px;
+}
+
+.imp-preview-warn {
+  margin: 0;
+  color: var(--imp-danger);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+/* 10. 保留 / 剪切选项 ------------------------------------------------------ */
+.imp-keep-row {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding-top: 2px;
+  border-top: 1px solid var(--imp-border);
+}
+
+/* 11. 复选框 --------------------------------------------------------------- */
+.imp-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  align-self: flex-start;
+  padding-top: 8px;
+  color: var(--imp-text);
+  font-size: 12px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.imp-check input {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: var(--imp-primary);
+  cursor: pointer;
+}
+
+.imp-check input:disabled {
+  cursor: not-allowed;
+}
+
+.imp-check:focus-within {
+  color: var(--imp-primary);
+}
+
+/* 12. 底部按钮区 ---------------------------------------------------------- */
+.imp-foot {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 10px 14px;
+  border-top: 1px solid var(--imp-border);
+  background: var(--imp-panel-soft);
+}
+
+.imp-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 12px;
+  border: 1px solid var(--imp-border-strong);
+  border-radius: var(--imp-radius-sm);
+  background: var(--imp-panel);
+  color: var(--imp-text);
+  font: inherit;
+  white-space: nowrap;
+  cursor: pointer;
+  box-shadow: var(--imp-shadow-1);
+  transition: color var(--imp-dur) var(--imp-ease), background-color var(--imp-dur) var(--imp-ease),
+    border-color var(--imp-dur) var(--imp-ease), box-shadow var(--imp-dur) var(--imp-ease),
+    transform var(--imp-dur) var(--imp-ease);
+}
+
+.imp-btn:hover:not(:disabled) {
+  border-color: var(--imp-primary);
+  color: var(--imp-primary);
+  transform: translateY(-1px);
+  box-shadow: var(--imp-shadow-2);
+}
+
+.imp-btn:active:not(:disabled) {
+  transform: translateY(0);
+  box-shadow: var(--imp-shadow-1);
+}
+
+.imp-btn:focus-visible {
+  outline: 2px solid var(--imp-primary);
+  outline-offset: 1px;
+}
+
+.imp-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  box-shadow: none;
+}
+
+.imp-btn.is-primary {
+  border-color: transparent;
+  background: linear-gradient(180deg, color-mix(in srgb, var(--imp-primary) 92%, #fff), var(--imp-primary));
+  color: #fff;
+}
+
+.imp-btn.is-primary:hover:not(:disabled) {
+  color: #fff;
+  filter: brightness(1.05);
+}
+
+.imp-btn.is-ghost {
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
+}
+
+.imp-btn.is-ghost:hover:not(:disabled) {
+  background: var(--imp-panel-soft);
+}
+
+/* 13. 动效 --------------------------------------------------------------- */
+@keyframes imp-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes imp-pop {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+/* 14. 减少动态效果 -------------------------------------------------------- */
+@media (prefers-reduced-motion: reduce) {
+  .imp-overlay,
+  .imp-dialog {
+    animation: none;
+  }
+
+  .imp-btn,
+  .imp-icon-btn,
+  .imp-input {
+    transition: none;
+  }
+
+  .imp-btn:hover:not(:disabled),
+  .imp-btn:active:not(:disabled) {
+    transform: none;
+  }
+}

@@ -1,0 +1,340 @@
+/* ============================================================================
+   历史记录面板（HistoryPanel）—— 底部抽屉
+   ----------------------------------------------------------------------------
+   - 类名一律 `hp-` 前缀，不改 shell.css / toolbar.css 里的任何既有类；
+   - 视觉语言刻意对齐日志抽屉 `.drawer`：同样贴底（状态栏之上 8px）、同样 300px 高、
+     `--panel` 底 + 1px 边框 + `--radius-lg` + `--shadow-3`，入场动画同为"淡入 + 上滑 14px"；
+   - 与 toolbar.css 同样的两层令牌写法：
+     ① `--hp-fb-*`：外壳缺席时的兜底色板（值对齐 shell.css，深色块只改这一层）；
+     ② `--hp-*`：优先引用外壳令牌 `var(--panel, …)`，外壳在就跟着外壳主题走，
+        外壳不在也不会出现"透明字 / 无边框"；
+   - 深色：外壳加载时由 shell.css 的深色令牌自动接管；外壳缺席时由本文件的
+     prefers-color-scheme 块兜底。两条路径都不会"半深半浅"；
+   - 动效：入场动画 + hover/状态过渡都遵守 prefers-reduced-motion。
+   ========================================================================== */
+
+/* 1. 设计令牌 ------------------------------------------------------------- */
+:where(.hp-panel, .hp-panel *) {
+  box-sizing: border-box;
+}
+
+.hp-panel {
+  /* ① 兜底色板（浅色；深色见下面的 prefers-color-scheme 块） */
+  --hp-fb-panel: #ffffff;
+  --hp-fb-panel-soft: #f8fafc;
+  --hp-fb-text: #16203a;
+  --hp-fb-muted: #667089;
+  --hp-fb-border: #e2e6ee;
+  --hp-fb-border-strong: #cfd6e4;
+  --hp-fb-primary: #2563eb;
+  --hp-fb-primary-soft: #e8efff;
+  --hp-fb-ok: #0f9d58;
+  --hp-fb-ok-soft: #e6f6ec;
+  --hp-fb-warn: #b45309;
+  --hp-fb-warn-soft: #fff4e5;
+  --hp-fb-shadow: 0 18px 40px rgb(16 24 40 / 16%);
+
+  /* ② 对外令牌：优先外壳令牌，取不到才退回 ① */
+  --hp-panel: var(--panel, var(--hp-fb-panel));
+  --hp-panel-soft: var(--panel-soft, var(--hp-fb-panel-soft));
+  --hp-text: var(--text, var(--hp-fb-text));
+  --hp-muted: var(--text-muted, var(--hp-fb-muted));
+  --hp-border: var(--border, var(--hp-fb-border));
+  --hp-border-strong: var(--border-strong, var(--hp-fb-border-strong));
+  --hp-primary: var(--primary, var(--hp-fb-primary));
+  --hp-primary-soft: var(--primary-soft, var(--hp-fb-primary-soft));
+  --hp-ok: var(--ok, var(--hp-fb-ok));
+  --hp-ok-soft: var(--ok-soft, var(--hp-fb-ok-soft));
+  --hp-warn: var(--warn, var(--hp-fb-warn));
+  --hp-warn-soft: var(--warn-soft, var(--hp-fb-warn-soft));
+  --hp-radius: var(--radius, 10px);
+  --hp-radius-sm: var(--radius-sm, 6px);
+  --hp-radius-lg: var(--radius-lg, 14px);
+  --hp-shadow: var(--shadow-3, var(--hp-fb-shadow));
+  --hp-dur: var(--dur, 220ms);
+  --hp-dur-fast: var(--dur-fast, 140ms);
+  --hp-ease: var(--ease, cubic-bezier(0.22, 0.61, 0.36, 1));
+}
+
+/* 2. 深色兜底（只改兜底色板 ①；外壳在时由 shell.css 说了算） --------------- */
+@media (prefers-color-scheme: dark) {
+  .hp-panel {
+    --hp-fb-panel: #161d2c;
+    --hp-fb-panel-soft: #1b2333;
+    --hp-fb-text: #e6ebf5;
+    --hp-fb-muted: #94a0b8;
+    --hp-fb-border: #262f42;
+    --hp-fb-border-strong: #33405a;
+    --hp-fb-primary: #6098ff;
+    --hp-fb-primary-soft: #1d2c4d;
+    --hp-fb-ok: #4ade80;
+    --hp-fb-ok-soft: #14301f;
+    --hp-fb-warn: #fbbf24;
+    --hp-fb-warn-soft: #33260f;
+    --hp-fb-shadow: 0 18px 40px rgb(0 0 0 / 55%);
+  }
+}
+
+/* 3. 抽屉容器 ------------------------------------------------------------- */
+.hp-panel {
+  position: fixed;
+  left: 10px;
+  right: 10px;
+  /* 与 .drawer 同一贴底位置：状态栏之上 8px */
+  bottom: calc(var(--statusbar-h, 34px) + 8px);
+  height: 300px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  color: var(--hp-text);
+  font-size: 13px;
+  background: var(--hp-panel);
+  border: 1px solid var(--hp-border);
+  border-radius: var(--hp-radius-lg);
+  box-shadow: var(--hp-shadow);
+  /* 抽屉也在 Univer 画布之上（它的弹层到 1070），但要让位给统一提示层 */
+  z-index: 2900;
+  animation: hp-drawer-in var(--hp-dur) var(--hp-ease);
+}
+
+@keyframes hp-drawer-in {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* 4. 头部：标题 + "当前：第 N / M 步" 摘要 + 关闭 -------------------------- */
+.hp-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 0 0 auto;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--hp-border);
+  color: var(--hp-muted);
+}
+
+.hp-title {
+  color: var(--hp-text);
+}
+
+.hp-summary {
+  /* 数字等宽：步数变化时摘要不会左右抖 */
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.hp-spacer {
+  flex: 1;
+}
+
+.hp-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--hp-muted);
+  font: inherit;
+  line-height: 1;
+  cursor: pointer;
+  transition: color var(--hp-dur-fast) var(--hp-ease), background-color var(--hp-dur-fast) var(--hp-ease),
+    border-color var(--hp-dur-fast) var(--hp-ease);
+}
+
+.hp-close:hover {
+  border-color: var(--hp-primary);
+  background: var(--hp-primary-soft);
+  color: var(--hp-primary);
+}
+
+.hp-close:focus-visible {
+  outline: 2px solid var(--hp-primary);
+  outline-offset: 1px;
+}
+
+/* 5. 列表 ---------------------------------------------------------------- */
+.hp-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  /* 列表自己滚动，抽屉高度固定 */
+  max-height: 252px;
+  overflow: auto;
+  margin: 0;
+  padding: 6px 8px 8px;
+  list-style: none;
+  scrollbar-width: thin;
+  scrollbar-color: var(--hp-border-strong) transparent;
+}
+
+.hp-list::-webkit-scrollbar {
+  width: 8px;
+}
+
+.hp-list::-webkit-scrollbar-thumb {
+  border-radius: 4px;
+  background: var(--hp-border-strong);
+}
+
+.hp-row {
+  margin: 0;
+  padding: 0;
+}
+
+/* 每项都是 <button>：键盘可达、Enter/Space 原生激活 */
+.hp-item {
+  display: grid;
+  grid-template-columns: 30px 62px auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 5px 10px;
+  border: 1px solid transparent;
+  border-radius: var(--hp-radius-sm);
+  background: transparent;
+  color: var(--hp-text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color var(--hp-dur-fast) var(--hp-ease), border-color var(--hp-dur-fast) var(--hp-ease),
+    color var(--hp-dur-fast) var(--hp-ease);
+}
+
+/* 条目之间留 1px：按钮是 li 的子元素，所以相邻兄弟写在 .hp-row 上 */
+.hp-row + .hp-row {
+  margin-top: 1px;
+}
+
+.hp-step {
+  text-align: right;
+  color: var(--hp-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.hp-time {
+  /* 与日志抽屉的 .log-list 同一套等宽字体，时间列天然对齐 */
+  font-family: Consolas, 'Cascadia Mono', ui-monospace, monospace;
+  font-size: 11.5px;
+  color: var(--hp-muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.hp-badge {
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--hp-border);
+  background: var(--hp-panel-soft);
+  color: var(--hp-muted);
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+.hp-badge-primary {
+  border-color: color-mix(in srgb, var(--hp-primary) 35%, transparent);
+  background: var(--hp-primary-soft);
+  color: var(--hp-primary);
+}
+
+.hp-badge-ok {
+  border-color: color-mix(in srgb, var(--hp-ok) 35%, transparent);
+  background: var(--hp-ok-soft);
+  color: var(--hp-ok);
+}
+
+.hp-badge-warn {
+  border-color: color-mix(in srgb, var(--hp-warn) 35%, transparent);
+  background: var(--hp-warn-soft);
+  color: var(--hp-warn);
+}
+
+.hp-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 6. 状态：已应用 / 已撤销 / 当前步 / 禁用 / hover / focus ------------------ */
+
+/* 当前步之前的条目：已应用，正常色（序号用主色强调"走到这里了"） */
+.hp-item.is-applied .hp-step {
+  color: var(--hp-primary);
+  font-weight: 600;
+}
+
+/* 当前步之后的条目：已撤销 → 降饱和 + 删除线 */
+.hp-item.is-undone {
+  opacity: 0.72;
+  filter: saturate(0.35);
+}
+
+.hp-item.is-undone .hp-label {
+  text-decoration: line-through;
+}
+
+/* 当前步：主色浅底 + 左侧 3px 主色条（inset 阴影，不挤动其它列的宽度） */
+.hp-item.is-current {
+  border-color: color-mix(in srgb, var(--hp-primary) 35%, transparent);
+  background: var(--hp-primary-soft);
+  box-shadow: inset 3px 0 0 0 var(--hp-primary);
+}
+
+.hp-item:hover:not(:disabled) {
+  border-color: var(--hp-border-strong);
+  background: var(--hp-panel-soft);
+}
+
+.hp-item:hover:not(:disabled) .hp-label {
+  color: var(--hp-primary);
+}
+
+.hp-item.is-current:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--hp-primary) 55%, transparent);
+  background: var(--hp-primary-soft);
+}
+
+.hp-item:focus-visible {
+  outline: 2px solid var(--hp-primary);
+  outline-offset: -2px;
+}
+
+/* 不可达（撤销/重做次数不够）：置灰 + 禁止光标，title 里说明原因 */
+.hp-item:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* 7. 空状态 -------------------------------------------------------------- */
+.hp-empty {
+  flex: 1 1 auto;
+  display: grid;
+  place-items: center;
+  padding: 12px;
+  color: var(--hp-muted);
+  font-size: 12.5px;
+}
+
+/* 8. 无障碍 -------------------------------------------------------------- */
+@media (prefers-reduced-motion: reduce) {
+  .hp-panel {
+    animation: none;
+  }
+
+  .hp-close,
+  .hp-item {
+    transition: none;
+  }
+}

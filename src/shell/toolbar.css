@@ -1,0 +1,455 @@
+/* ============================================================================
+   顶部工具栏（Toolbar）与图标按钮
+   ----------------------------------------------------------------------------
+   - 只新增 `.tb-*` 类，不改 shell.css 里已有的任何类；
+   - 配色 / 圆角 / 阴影 / 过渡全部直接引用外壳令牌（var(--panel) 等），
+     本文件**不自建调色板**，因此深色模式由 shell.css 的 prefers-color-scheme 自动接管；
+   - 每个令牌都带兜底默认值（var(--primary, #2563eb) 形式）：即使外壳样式没加载，
+     工具栏也不会出现"透明字 / 无边框"的崩坏样子；
+   - 关键数值：整条 48px 高、28px 图标按钮 / 圆角 8、分组间距 8（组内 4）、
+     标签高 28 / 圆角 8 / 当前项底部 2px 主色条。
+   ========================================================================== */
+
+:where(.tb-toolbar, .tb-toolbar *) {
+  box-sizing: border-box;
+}
+
+/* ------------------------------------------------------------------ 容器 */
+.tb-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+  flex-wrap: nowrap;
+  height: 48px;
+  min-height: 48px;
+  min-width: 0;
+  /* 单行绝不换行：横向溢出由 .tb-tabs 自己滚动消化 */
+  overflow: hidden;
+  padding: 0 10px;
+  color: var(--text, #16203a);
+  background: color-mix(in srgb, var(--panel, #ffffff) 88%, transparent);
+  backdrop-filter: saturate(1.4) blur(8px);
+  border-bottom: 1px solid var(--border, #e2e6ee);
+  font-size: 13px;
+}
+
+.tb-toolbar.is-busy {
+  cursor: progress;
+}
+
+/* ------------------------------------------------------------------ 分组 */
+.tb-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+
+/* 工作区一侧（右侧）：用一条 1px 竖线把"导入到工作区"与左侧操作区分开 */
+.tb-right {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+  margin-left: 2px;
+  padding-left: 8px;
+  border-left: 1px solid var(--border, #e2e6ee);
+}
+
+/* -------------------------------------------------------- 图标按钮 28×28 */
+.tb-icon-btn {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-muted, #667089);
+  font: inherit;
+  line-height: 1;
+  cursor: pointer;
+  transition: color var(--dur-fast, 140ms) var(--ease, cubic-bezier(0.22, 0.61, 0.36, 1)),
+    background-color var(--dur-fast, 140ms) var(--ease, cubic-bezier(0.22, 0.61, 0.36, 1)),
+    border-color var(--dur-fast, 140ms) var(--ease, cubic-bezier(0.22, 0.61, 0.36, 1)),
+    transform var(--dur-fast, 140ms) var(--ease, cubic-bezier(0.22, 0.61, 0.36, 1));
+}
+
+.tb-icon-btn:hover:not(:disabled) {
+  border-color: var(--primary, #2563eb);
+  background: var(--primary-soft, #e8efff);
+  color: var(--primary, #2563eb);
+}
+
+/* 按下时轻微下沉 1px，和 .btn 的"上浮/回落"手感保持一致 */
+.tb-icon-btn:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.tb-icon-btn:focus-visible {
+  outline: 2px solid var(--primary, #2563eb);
+  outline-offset: 1px;
+}
+
+.tb-icon-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* 面板按钮的"已展开"态：主色浅底 + 主色图标 */
+.tb-icon-btn.is-active {
+  border-color: color-mix(in srgb, var(--primary, #2563eb) 35%, transparent);
+  background: var(--primary-soft, #e8efff);
+  color: var(--primary, #2563eb);
+}
+
+/* ------------------------------------------------- 打开文件（label + input） */
+.tb-file-btn {
+  overflow: hidden;
+}
+
+/**
+ * 「打开表格」按钮的鼠标指针（用户明确要求：移上去要变手形）。
+ *
+ * 为什么用"连子元素一起点住"的写法：这个按钮是 `<label>` 套一个透明的 `<input type="file">`，
+ * 指针实际停在 input 上；UA 对 file input 的默认指针不是手形，某些状态下（比如按钮被
+ * `pointer-events: none` 变成"鼠标穿透"）就会露出箭头。这里把按钮与内部节点一次性钉死成手形，
+ * 忙时（`is-busy`）改成"禁止"，不写 `pointer-events: none`（穿透会让指针退回箭头）。
+ */
+.tb-file-btn,
+.tb-file-btn *,
+.tb-file-btn input[type='file'] {
+  cursor: pointer;
+}
+
+.tb-file-btn.is-busy,
+.tb-file-btn.is-busy *,
+.tb-file-btn.is-busy input[type='file'] {
+  cursor: not-allowed;
+}
+
+/* 隐藏但仍可被 Playwright setInputFiles 命中的 input：
+   不用 display:none / visibility:hidden，避免被移出可访问树与 Tab 序列 */
+.tb-file-input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+/* 键盘聚焦到内部 input 时，让"打开"图标按钮整体亮起来（label 不支持 :focus） */
+.tb-file-btn:focus-within {
+  outline: 2px solid var(--primary, #2563eb);
+  outline-offset: 1px;
+}
+
+/* 忙时：视觉上压暗 + 禁止点击。
+   注意**不要**在这里写 `pointer-events: none` —— 那样鼠标会"穿过"按钮落在工具栏背景上，
+   指针形状退回箭头，用户看到的就是"移上去没有手形"（用户实测反馈）。
+   点击本来就点不动：里面的 `<input type="file">` 在 busy 时是 `disabled`。 */
+.tb-file-btn.is-busy {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* -------------------------------------------------------- 分段控件（模式） */
+.tb-seg {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex: 0 0 auto;
+  padding: 1px;
+  border: 1px solid var(--border, #e2e6ee);
+  border-radius: 9px;
+  background: var(--panel-soft, #f8fafc);
+}
+
+
+.tb-seg-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-muted, #667089);
+  font: inherit;
+  line-height: 1;
+  cursor: pointer;
+  transition: color var(--dur-fast, 140ms) var(--ease, cubic-bezier(0.22, 0.61, 0.36, 1)),
+    background-color var(--dur-fast, 140ms) var(--ease, cubic-bezier(0.22, 0.61, 0.36, 1)),
+    border-color var(--dur-fast, 140ms) var(--ease, cubic-bezier(0.22, 0.61, 0.36, 1)),
+    transform var(--dur-fast, 140ms) var(--ease, cubic-bezier(0.22, 0.61, 0.36, 1));
+}
+
+.tb-seg-btn:hover:not(:disabled):not(.is-active) {
+  background: var(--panel, #ffffff);
+  color: var(--text, #16203a);
+}
+
+.tb-seg-btn:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.tb-seg-btn:focus-visible {
+  outline: 2px solid var(--primary, #2563eb);
+  outline-offset: 1px;
+}
+
+.tb-seg-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* 当前项：主色浅底 + 主色图标 + 一点点浮起 */
+.tb-seg-btn.is-active {
+  border-color: color-mix(in srgb, var(--primary, #2563eb) 35%, transparent);
+  background: var(--primary-soft, #e8efff);
+  color: var(--primary, #2563eb);
+  box-shadow: var(--shadow-1, 0 1px 2px rgba(16, 24, 40, 0.06));
+}
+
+/* ------------------------------------------------------------------ 标签条 */
+.tb-tabs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 1 1 auto;
+  /* min-width:0 + overflow-x:auto：标签多了横向滚动，而不是把工具栏撑破 */
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 2px 0;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong, #cfd6e4) transparent;
+}
+
+.tb-tabs::-webkit-scrollbar {
+  height: 6px;
+}
+
+.tb-tabs::-webkit-scrollbar-thumb {
+  border-radius: 3px;
+  background: var(--border-strong, #cfd6e4);
+}
+
+.tb-tabs-empty {
+  overflow: hidden;
+  color: var(--text-muted, #667089);
+}
+
+.tb-file-name {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-muted, #667089);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tb-file-name.is-placeholder {
+  opacity: 0.7;
+}
+
+.tb-tab-item {
+  position: relative;
+  display: inline-flex;
+  flex: 0 0 auto;
+  max-width: 180px;
+}
+
+.tb-tab {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 180px;
+  height: 28px;
+  padding: 0 22px 0 10px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-muted, #667089);
+  font: inherit;
+  font-size: 12.5px;
+  line-height: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  cursor: pointer;
+  transition: color var(--dur-fast, 140ms) var(--ease, cubic-bezier(0.22, 0.61, 0.36, 1)),
+    background-color var(--dur-fast, 140ms) var(--ease, cubic-bezier(0.22, 0.61, 0.36, 1)),
+    border-color var(--dur-fast, 140ms) var(--ease, cubic-bezier(0.22, 0.61, 0.36, 1));
+}
+
+/* 文件名过长省略号 */
+.tb-tab-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tb-tab:hover:not(:disabled) {
+  background: var(--panel-soft, #f8fafc);
+  color: var(--text, #16203a);
+}
+
+.tb-tab:focus-visible {
+  outline: 2px solid var(--primary, #2563eb);
+  outline-offset: -2px;
+}
+
+.tb-tab:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* 当前标签：主色浅底 + 底部 2px 主色条 */
+.tb-tab.is-active {
+  background: var(--primary-soft, #e8efff);
+  color: var(--primary, #2563eb);
+  font-weight: 600;
+}
+
+.tb-tab.is-active::after {
+  content: '';
+  position: absolute;
+  right: 8px;
+  bottom: 1px;
+  left: 8px;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--primary, #2563eb);
+}
+
+/* 未保存标记 */
+.tb-tab-dot {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--primary, #2563eb);
+}
+
+/* 关闭按钮：默认隐形，hover / 键盘聚焦 / 当前标签时才出现 */
+.tb-tab-close {
+  position: absolute;
+  top: 50%;
+  right: 3px;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted, #667089);
+  line-height: 1;
+  opacity: 0;
+  cursor: pointer;
+  transition: opacity var(--dur-fast, 140ms) var(--ease, cubic-bezier(0.22, 0.61, 0.36, 1)),
+    color var(--dur-fast, 140ms) var(--ease, cubic-bezier(0.22, 0.61, 0.36, 1)),
+    background-color var(--dur-fast, 140ms) var(--ease, cubic-bezier(0.22, 0.61, 0.36, 1)),
+    border-color var(--dur-fast, 140ms) var(--ease, cubic-bezier(0.22, 0.61, 0.36, 1));
+}
+
+.tb-tab-item:hover .tb-tab-close,
+.tb-tab-item:focus-within .tb-tab-close,
+.tb-tab-item.is-active .tb-tab-close {
+  opacity: 1;
+}
+
+.tb-tab-close:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--danger, #dc2626) 40%, transparent);
+  background: var(--danger-soft, #fee2e2);
+  color: var(--danger, #dc2626);
+}
+
+.tb-tab-close:focus-visible {
+  outline: 2px solid var(--primary, #2563eb);
+  outline-offset: 1px;
+  opacity: 1;
+}
+
+.tb-tab-close:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+/* busy：整条工具栏的按钮都置灰，关闭键的"hover 才显示"也不该再亮起来 */
+.tb-toolbar.is-busy .tb-tab-close {
+  opacity: 0.35;
+}
+
+/* --------------------------------------------------------------- 无障碍 */
+.tb-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tb-icon-btn,
+  .tb-seg-btn,
+  .tb-tab,
+  .tb-tab-close {
+    transition: none;
+  }
+
+  .tb-icon-btn:active:not(:disabled),
+  .tb-seg-btn:active:not(:disabled) {
+    transform: none;
+  }
+}
+
+/* 顶部选项：拖到工作区后是否保留表格内容（与工作区底部选项对称） */
+.tb-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 8px;
+  height: 26px;
+  border: 1px solid var(--border, #e2e6ee);
+  border-radius: 8px;
+  background: var(--panel-soft, #f8fafc);
+  color: var(--text-muted, #64748b);
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: pointer;
+  user-select: none;
+  transition: border-color 120ms ease, color 120ms ease, background-color 120ms ease;
+}
+
+.tb-check:hover {
+  border-color: var(--primary, #2563eb);
+  color: var(--primary, #2563eb);
+}
+
+.tb-check input[type='checkbox'] {
+  width: 13px;
+  height: 13px;
+  accent-color: var(--primary, #2563eb);
+  cursor: pointer;
+}

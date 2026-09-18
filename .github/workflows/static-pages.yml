@@ -1,0 +1,75 @@
+# 把「静态版」发到 GitHub Pages（项目站点，挂在 https://<user>.github.io/<repo>/ 下）。
+#
+# 为什么能用：这个工具是**纯前端**的，`npm run build:static` 的产物就是一堆静态文件，
+# 没有后端接口、没有数据库；学生数据全程留在浏览器本地（IndexedDB），不上传任何服务器。
+#
+# 形态差异（重要）：静态版**没有本机进程**，所以"经本机 Excel 另存为 .ods/.xls/.xlsb"与".xlsb 导入"
+# 会在界面上自动置灰并写明"本地版可用"。要这些能力，用本地版：`run.cmd` / `npm run dev`。
+#
+# 发布前务必确认：仓库里**没有真实学生文件**（座位表/成绩表含姓名学号）。
+# 只有 `fixtures/` 下由脚本合成的样本可以进仓库。
+name: Deploy static build to Pages
+
+on:
+  push:
+    branches: [main]
+    # 只在工具本体变化时重建（文档改动没必要重新发布）
+    paths:
+      - 'src/**'
+      - 'build/**'
+      - 'index.html'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'public/**'
+      - 'vite.config.ts'
+      - 'tools/serve-dist.mjs'
+      - '.github/workflows/static-pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# 同一时间只发一次；排队中的旧提交直接让位
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - run: npm ci
+
+      # 静态形态：base './'，且不挂本地 Excel 转换桥（插件在 --mode static 下不启用）
+      - run: npm run build:static
+
+      - name: 产物体检（体积/分块/不该混进无关语言文件）
+        run: node tools/measure-bundle.mjs --strict
+
+      # 发布前的最后一道闸：类型检查 + 单元测试
+      - run: npm run typecheck
+      - run: npm test
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

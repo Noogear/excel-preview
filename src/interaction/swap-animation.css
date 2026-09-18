@@ -1,0 +1,254 @@
+/**
+ * 「点击交换」动画原语的样式（类名前缀统一 `swap-`）。
+ *
+ * 这份样式是**外观的唯一真源**；`swap-animation.ts` 里还内嵌了一份等价的兜底样式，
+ * 用于宿主没有 import 本文件时（例如某些 e2e 页面）保证动画不至于退化成裸 div。
+ * 两份声明等价，同时存在也不会互相冲突。
+ *
+ * 约定：
+ *  - 位置只由 transform 表达（组件侧写 translate3d / scale），本文件不出现逐帧 left/top；
+ *  - 所有临时节点都是 `pointer-events: none`，绝不抢 Univer 画布的指针事件；
+ *  - 颜色/尺寸全部走变量，深浅色用 prefers-color-scheme 覆盖默认值。
+ */
+
+:root {
+  /* —— 层级 —— */
+  --swap-layer-z-index: 9998;
+
+  /* —— 胶囊尺寸 —— */
+  --swap-chip-max-width: 240px;
+  --swap-chip-padding-x: 10px;
+  --swap-chip-padding-y: 5px;
+  --swap-chip-radius: 999px;
+  --swap-chip-border-width: 1px;
+
+  /* —— 胶囊配色（浅色，默认值）—— */
+  --swap-chip-bg: #ffffff;
+  --swap-chip-color: #1f2937;
+  --swap-chip-border: #2563eb;
+  --swap-chip-shadow: 0 6px 18px rgba(15, 23, 42, 0.18);
+
+  /* —— 幽灵（待交换）配色：虚线描边 + 略透明的底，与"已落位"的实心胶囊区分开 —— */
+  --swap-ghost-bg: rgba(255, 255, 255, 0.96);
+  --swap-ghost-color: #1d4ed8;
+  --swap-ghost-border: #2563eb;
+
+  /* —— 字体 —— */
+  --swap-chip-font-family: 'Microsoft YaHei', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --swap-chip-font-size: 12px;
+  --swap-chip-line-height: 18px;
+
+  /* —— 时长（与 TS 里的 DEFAULT_* 常量对应）—— */
+  --swap-swap-duration: 340ms;
+  --swap-pulse-duration: 420ms;
+  --swap-chip-fade-in-duration: 120ms;
+  --swap-chip-fade-out-duration: 140ms;
+  --swap-ghost-fade-in-duration: 120ms;
+  --swap-ghost-fade-out-duration: 140ms;
+
+  /* —— 缓动 —— */
+  --swap-ease-out: cubic-bezier(0.22, 0.61, 0.36, 1);
+  --swap-ease-pulse: cubic-bezier(0.16, 0.84, 0.44, 1);
+}
+
+/* -------------------------------------------------------------------------- */
+/* 层                                                                          */
+/* -------------------------------------------------------------------------- */
+
+/* 满屏 fixed 层：让子节点的视口坐标可以直接当层内坐标用，且不受宿主 overflow/stacking 影响。 */
+.swap-layer {
+  position: fixed;
+  inset: 0;
+  z-index: var(--swap-layer-z-index);
+  pointer-events: none;
+}
+
+.swap-chips {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+/* -------------------------------------------------------------------------- */
+/* 内容芯片                                                                    */
+/* -------------------------------------------------------------------------- */
+
+.swap-chip {
+  position: absolute;
+  left: 0;
+  top: 0;
+  box-sizing: border-box;
+  max-width: var(--swap-chip-max-width);
+  padding: var(--swap-chip-padding-y) var(--swap-chip-padding-x);
+  background: var(--swap-chip-bg);
+  color: var(--swap-chip-color);
+  border: var(--swap-chip-border-width) solid var(--swap-chip-border);
+  border-radius: var(--swap-chip-radius);
+  box-shadow: var(--swap-chip-shadow);
+  font-family: var(--swap-chip-font-family);
+  font-size: var(--swap-chip-font-size);
+  line-height: var(--swap-chip-line-height);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  /* 缩放/位移的锚点放在左上角：flyIn 的 translate+scale 才是"左上角对齐"的直观语义 */
+  transform-origin: top left;
+  will-change: transform;
+  contain: layout style;
+  pointer-events: none;
+  /*
+   * transition 必须保持 none：位移动画由 flyIn 逐帧写 transform，
+   * 一旦这里挂了 transform 过渡，浏览器会把每一帧的新值当成"新的过渡目标"（retargeting），
+   * 元素会被过渡拖住、永远追不上 flyIn 的插值。位移只走 rAF，过渡只用于 opacity。
+   */
+  transition: none;
+}
+
+.swap-chip--fade-in {
+  animation: swap-chip-in var(--swap-chip-fade-in-duration) ease-out both;
+}
+
+.swap-chip--fade-out {
+  animation: swap-chip-out var(--swap-chip-fade-out-duration) ease-in both;
+}
+
+/* -------------------------------------------------------------------------- */
+/* 选中脉冲圆环                                                                */
+/* -------------------------------------------------------------------------- */
+
+.swap-pulse {
+  position: absolute;
+  left: 0;
+  top: 0;
+  overflow: visible;
+  pointer-events: none;
+  will-change: transform;
+}
+
+.swap-pulse-ring {
+  fill: none;
+  stroke: var(--swap-chip-border);
+  vector-effect: non-scaling-stroke;
+}
+
+.swap-pulse--pulse {
+  animation: swap-ring-pulse var(--swap-pulse-duration) var(--swap-ease-pulse) both;
+}
+
+/* -------------------------------------------------------------------------- */
+/* 待交换幽灵（跟随指针）                                                       */
+/* -------------------------------------------------------------------------- */
+
+.swap-pending-ghost {
+  position: absolute;
+  left: 0;
+  top: 0;
+  pointer-events: none;
+  will-change: transform;
+}
+
+.swap-pending-ghost-text {
+  display: block;
+  box-sizing: border-box;
+  max-width: var(--swap-chip-max-width);
+  padding: var(--swap-chip-padding-y) var(--swap-chip-padding-x);
+  background: var(--swap-ghost-bg);
+  color: var(--swap-ghost-color);
+  border: var(--swap-chip-border-width) dashed var(--swap-ghost-border);
+  border-radius: var(--swap-chip-radius);
+  box-shadow: var(--swap-chip-shadow);
+  font-family: var(--swap-chip-font-family);
+  font-size: var(--swap-chip-font-size);
+  line-height: var(--swap-chip-line-height);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.swap-pending-ghost--ghost-in {
+  animation: swap-ghost-in var(--swap-ghost-fade-in-duration) ease-out both;
+}
+
+.swap-pending-ghost--ghost-out {
+  animation: swap-ghost-out var(--swap-ghost-fade-out-duration) ease-in both;
+}
+
+/* -------------------------------------------------------------------------- */
+/* 关键帧（只动 opacity / transform）                                           */
+/* -------------------------------------------------------------------------- */
+
+@keyframes swap-chip-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes swap-chip-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes swap-ghost-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes swap-ghost-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes swap-ring-pulse {
+  from {
+    opacity: 0.9;
+    transform: scale(0.55);
+  }
+  to {
+    opacity: 0;
+    transform: scale(1.7);
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* 深浅色                                                                      */
+/* -------------------------------------------------------------------------- */
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --swap-chip-bg: #1e293b;
+    --swap-chip-color: #e2e8f0;
+    --swap-chip-border: #60a5fa;
+    --swap-chip-shadow: 0 8px 22px rgba(0, 0, 0, 0.45);
+    --swap-ghost-bg: rgba(30, 41, 59, 0.92);
+    --swap-ghost-color: #bfdbfe;
+    --swap-ghost-border: #60a5fa;
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* 减弱动画偏好：不做位移/脉冲，但保持节点可见（JS 侧的 reducedMotion 会直接跳过动画） */
+/* -------------------------------------------------------------------------- */
+
+@media (prefers-reduced-motion: reduce) {
+  .swap-chip,
+  .swap-pending-ghost,
+  .swap-pulse {
+    transition: none !important;
+    animation-duration: 1ms !important;
+  }
+}

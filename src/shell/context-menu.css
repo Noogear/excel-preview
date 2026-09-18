@@ -1,0 +1,213 @@
+/* ============================================================================
+   右键菜单（ContextMenu）
+   ----------------------------------------------------------------------------
+   - 只新增 `.cm-*` 类，不改 shell.css / toolbar.css 里已有的任何类；
+   - 颜色 / 圆角 / 阴影 / 动效全部引用外壳令牌（var(--panel) 等），本文件**不自建调色板**：
+     深色模式由 shell.css 的 prefers-color-scheme 自动接管；
+   - 令牌先落到 `--cm-*` 局部别名上，每个别名都带兜底值：即使外壳样式没加载，
+     深色偏好下也不会"白底黑字"砸在黑界面上（深色兜底见下方 media query）；
+   - 定位：position: fixed + JS 算出的 left/top（见 context-menu-model.ts 的
+     clampMenuPosition：贴边翻转、留 8px 边距）；宽度自适应内容，min 160px / max 260px。
+   ========================================================================== */
+
+:where(.cm-menu, .cm-menu *) {
+  box-sizing: border-box;
+}
+
+/* ------------------------------------------------------------------ 容器 */
+.cm-menu {
+  --cm-panel: var(--panel, #ffffff);
+  --cm-border: var(--border, #e2e6ee);
+  --cm-text: var(--text, #16203a);
+  --cm-muted: var(--text-muted, #667089);
+  --cm-hover-bg: var(--panel-soft, #f8fafc);
+  --cm-active-bg: var(--primary-soft, #e8efff);
+  --cm-active-fg: var(--primary, #2563eb);
+  --cm-danger: var(--danger, #dc2626);
+  --cm-danger-bg: var(--danger-soft, #fee2e2);
+  --cm-ring: var(--primary, #2563eb);
+  --cm-shadow: var(--shadow-3, 0 18px 40px rgba(16, 24, 40, 0.16));
+
+  position: fixed;
+  /* 压过 Univer 的弹层（上游 popup z-index 到 1070），否则右键菜单会被它盖住；见 shell.css 的 --z-menu */
+  z-index: var(--z-menu, 3200);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: max-content;
+  min-width: 160px;
+  max-width: 260px;
+  /* 项数很多时的兜底：绝不长到视口外面去（clampMenuPosition 的边距是 8px） */
+  max-height: calc(100vh - 16px);
+  overflow-x: hidden;
+  overflow-y: auto;
+  margin: 0;
+  padding: 4px;
+  border: 1px solid var(--cm-border);
+  border-radius: var(--radius, 10px);
+  background: var(--cm-panel);
+  color: var(--cm-text);
+  box-shadow: var(--cm-shadow);
+  font-family: 'Microsoft YaHei', 'PingFang SC', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  font-size: 13px;
+  /* 右键菜单是"瞬态"浮层：默认不允许选中文字，避免拖拽时把标签涂蓝 */
+  user-select: none;
+}
+
+/* 入场动效只在**定位算完之后**才挂上（组件加 .is-positioned）：
+   动画里的 transform: scale() 会让 getBoundingClientRect() 量到"缩小版"尺寸，
+   而组件正是用这次测量去夹取位置的 —— 实测会偏出 2~3px，所以第一帧必须无 transform。 */
+.cm-menu.is-positioned {
+  animation: cm-in var(--dur-fast, 140ms) var(--ease, cubic-bezier(0.22, 0.61, 0.36, 1));
+}
+
+@keyframes cm-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+/* ------------------------------------------------------------------ 菜单项 */
+.cm-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 28px;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm, 6px);
+  background: transparent;
+  color: var(--cm-text);
+  font: inherit;
+  font-size: 12.5px;
+  line-height: 1.25;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color var(--dur-fast, 140ms) var(--ease, cubic-bezier(0.22, 0.61, 0.36, 1)),
+    color var(--dur-fast, 140ms) var(--ease, cubic-bezier(0.22, 0.61, 0.36, 1)),
+    border-color var(--dur-fast, 140ms) var(--ease, cubic-bezier(0.22, 0.61, 0.36, 1));
+}
+
+/* 鼠标悬停：浅灰底，不动文字颜色（鼠标路径下 .is-active 也会被同步上，两种高亮可叠加） */
+.cm-item:not(.is-disabled):hover {
+  background: var(--cm-hover-bg);
+}
+
+/* 键盘当前项（↑↓/Home/End 或聚焦）：主色浅底 + 主色文字，键盘用户一眼能看到"焦点在哪" */
+.cm-item.is-active:not(.is-disabled) {
+  background: var(--cm-active-bg);
+  color: var(--cm-active-fg);
+}
+
+.cm-item:focus-visible {
+  outline: 2px solid var(--cm-ring);
+  outline-offset: -2px;
+}
+
+/* 左侧图标位：固定 16px 宽，图标缺失时也保持文字对齐 */
+.cm-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 16px;
+  width: 16px;
+  height: 16px;
+  color: var(--cm-muted);
+}
+
+.cm-item.is-active:not(.is-disabled) .cm-icon {
+  color: var(--cm-active-fg);
+}
+
+.cm-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 右侧快捷键提示：等宽字体 + 次要色，不抢标签的视觉权重 */
+.cm-shortcut {
+  flex: 0 0 auto;
+  margin-left: 10px;
+  padding-left: 10px;
+  color: var(--cm-muted);
+  font-family: Consolas, 'Cascadia Mono', ui-monospace, SFMono-Regular, monospace;
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+/* ------------------------------------------------------------- 危险 / 禁用 */
+/* 危险操作（删除 / 清空）：红色文字 + 红色图标，悬停时红底 */
+.cm-item.is-danger {
+  color: var(--cm-danger);
+}
+
+.cm-item.is-danger .cm-icon {
+  color: var(--cm-danger);
+}
+
+.cm-item.is-danger:not(.is-disabled):hover,
+.cm-item.is-danger.is-active:not(.is-disabled) {
+  background: var(--cm-danger-bg);
+  color: var(--cm-danger);
+}
+
+.cm-item.is-danger:not(.is-disabled):hover .cm-icon,
+.cm-item.is-danger.is-active:not(.is-disabled) .cm-icon {
+  color: var(--cm-danger);
+}
+
+/* 禁用项：aria-disabled + .is-disabled（点击由组件侧拦掉，不进 Tab / 箭头序列） */
+.cm-item.is-disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* ------------------------------------------------------------------ 分隔线 */
+.cm-sep {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--cm-border);
+  /* 分隔线不可点，也不该被 flex 压扁 */
+  flex: 0 0 1px;
+}
+
+/* ------------------------------------------------------------------ 深色 */
+/* 仅当外壳令牌缺失时生效：令牌存在时上面的 alias 已经解析成令牌值，这里改的是兜底 */
+@media (prefers-color-scheme: dark) {
+  .cm-menu {
+    --cm-panel: var(--panel, #161d2c);
+    --cm-border: var(--border, #262f42);
+    --cm-text: var(--text, #e6ebf5);
+    --cm-muted: var(--text-muted, #94a0b8);
+    --cm-hover-bg: var(--panel-soft, #1b2333);
+    --cm-active-bg: var(--primary-soft, #1d2c4d);
+    --cm-active-fg: var(--primary, #6098ff);
+    --cm-danger: var(--danger, #f87171);
+    --cm-danger-bg: var(--danger-soft, #3a1618);
+    --cm-ring: var(--primary, #6098ff);
+    --cm-shadow: var(--shadow-3, 0 18px 40px rgba(0, 0, 0, 0.55));
+  }
+}
+
+/* --------------------------------------------------------------- 无障碍 */
+@media (prefers-reduced-motion: reduce) {
+  /* 选择器权重必须 >= .cm-menu.is-positioned，否则动画关不掉 */
+  .cm-menu,
+  .cm-menu.is-positioned {
+    animation: none;
+  }
+
+  .cm-item {
+    transition: none;
+  }
+}

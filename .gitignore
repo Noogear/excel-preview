@@ -1,0 +1,12 @@
+node_modules/
+dist/
+test-results/
+test-results-*/
+playwright-report/
+blob-report/
+.vite/
+.npm-cache/
+*.local
+# 性能基准产物：大夹具与打包中间产物都不进仓库（用 npm run bench:fixture 生成）
+fixtures/bench-*.xlsx
+.bench/

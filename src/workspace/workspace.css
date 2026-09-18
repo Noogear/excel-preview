@@ -1,0 +1,771 @@
+/* ==========================================================================
+   工作区侧边栏（暂存区）+ 快照缩略图
+   - 所有类名以 ws- 前缀；变量只挂在 .ws-panel / .ws-preview 子树上，不污染全局
+   - 变量分两层，兼顾"与外壳统一"和"独立可用"：
+     ① --ws-fb-*（fallback）：本文件自带的兜底色板，值刻意对齐 shell.css；
+     ② --ws-*（对外令牌）：优先引用外壳令牌 var(--panel, var(--ws-fb-panel))，
+        外壳在就用外壳的（改主题只改一处），外壳缺席就退回 ①，不会出现透明字/无边框；
+   - 深色：跟随系统 prefers-color-scheme，也可用 data-ws-theme="dark" 显式指定。
+     注意深色块**只改兜底色板 ①**：外壳加载时由 shell.css 的深色令牌说了算，
+     两条路径都不会出现"半深半浅"。
+   ========================================================================== */
+
+/* 1. 设计令牌（浅色兜底 + 引用外壳令牌） --------------------------------- */
+:where(.ws-panel, .ws-preview) {
+  /* ① 兜底色板（浅色；深色见下面两个块） */
+  --ws-fb-panel: #ffffff;
+  --ws-fb-panel-soft: #f8fafc;
+  --ws-fb-text: #16203a;
+  --ws-fb-muted: #667089;
+  --ws-fb-border: #e2e6ee;
+  --ws-fb-border-strong: #cfd6e4;
+  --ws-fb-primary: #2563eb;
+  --ws-fb-primary-soft: #e8efff;
+  --ws-fb-danger: #dc2626;
+  --ws-fb-danger-soft: #fee2e2;
+  --ws-fb-shadow: 0 4px 14px rgb(16 24 40 / 8%);
+  --ws-fb-shadow-hover: 0 6px 14px -4px rgb(16 24 40 / 16%);
+  --ws-fb-checker: #eceff3;
+  --ws-fb-checker-bg: #fafbfd;
+
+  /* ② 对外令牌：直接引用外壳令牌，取不到才用兜底 */
+  --ws-panel: var(--panel, var(--ws-fb-panel));
+  --ws-panel-soft: var(--panel-soft, var(--ws-fb-panel-soft));
+  --ws-text: var(--text, var(--ws-fb-text));
+  --ws-muted: var(--text-muted, var(--ws-fb-muted));
+  /* 更淡的一档：外壳没有对应令牌，用 muted 降透明度派生（深浅色都不用手工维护） */
+  --ws-faint: color-mix(in srgb, var(--ws-muted) 72%, transparent);
+  --ws-border: var(--border, var(--ws-fb-border));
+  --ws-border-strong: var(--border-strong, var(--ws-fb-border-strong));
+  --ws-primary: var(--primary, var(--ws-fb-primary));
+  --ws-primary-soft: var(--primary-soft, var(--ws-fb-primary-soft));
+  --ws-danger: var(--danger, var(--ws-fb-danger));
+  --ws-danger-soft: var(--danger-soft, var(--ws-fb-danger-soft));
+  --ws-radius: var(--radius, 10px);
+  --ws-radius-sm: var(--radius-sm, 6px);
+  /* 大圆角：工作区面板与表格区同款 */
+  --ws-radius-lg: var(--radius-lg, 12px);
+  /* 卡片阴影统一到外壳的二级阴影；hover 需要比静止态更强，外壳没有对应令牌，保留本地值 */
+  --ws-shadow: var(--shadow-2, var(--ws-fb-shadow));
+  --ws-shadow-hover: var(--ws-fb-shadow-hover);
+  /* 过渡时长/曲线也跟外壳一致（140ms + 同一条 ease） */
+  --ws-dur: var(--dur-fast, 140ms);
+  --ws-ease: var(--ease, cubic-bezier(0.22, 0.61, 0.36, 1));
+  --ws-checker-bg: var(--panel-soft, var(--ws-fb-checker-bg));
+  --ws-checker: var(--ws-fb-checker);
+
+  /* 缩略图纸面（Excel 内容所在的那张"纸"）—— **故意固定浅色，绝不跟随深色**：
+     快照里的填充色与字体色来自 xlsx 文件本身，都是按"白纸"设计的；一旦把纸面也调暗，
+     遇到"浅底填充 + 未显式指定字色"的单元格就会变成浅底浅字、直接看不见（实测踩过）。
+     这三个变量在下面的深色块里刻意不重定义。 */
+  --ws-sheet-bg: #ffffff;
+  --ws-sheet-fg: #1f2937;
+  --ws-grid-line: rgb(15 23 42 / 9%);
+}
+
+/* 2. 深色兜底（系统偏好） -------------------------------------------------- */
+/* 只覆盖兜底色板 ①：外壳加载时由 shell.css 的深色令牌生效，这里只服务于"外壳缺席"的场景 */
+@media (prefers-color-scheme: dark) {
+  :where(.ws-panel, .ws-preview) {
+    --ws-fb-panel: #161d2c;
+    --ws-fb-panel-soft: #1b2333;
+    --ws-fb-text: #e6ebf5;
+    --ws-fb-muted: #94a0b8;
+    --ws-fb-border: #262f42;
+    --ws-fb-border-strong: #33405a;
+    --ws-fb-primary: #6098ff;
+    --ws-fb-primary-soft: #1d2c4d;
+    --ws-fb-danger: #f87171;
+    --ws-fb-danger-soft: #3a1618;
+    --ws-fb-shadow: 0 4px 14px rgb(0 0 0 / 45%);
+    --ws-fb-shadow-hover: 0 6px 14px -4px rgb(0 0 0 / 55%);
+    --ws-fb-checker: #23272f;
+    --ws-fb-checker-bg: #181b21;
+  }
+}
+
+/* 2b. 深色兜底（显式指定：宿主页面自己控主题时用） ------------------------- */
+:where(.ws-panel[data-ws-theme='dark'], .ws-preview[data-ws-theme='dark']) {
+  --ws-fb-panel: #161d2c;
+  --ws-fb-panel-soft: #1b2333;
+  --ws-fb-text: #e6ebf5;
+  --ws-fb-muted: #94a0b8;
+  --ws-fb-border: #262f42;
+  --ws-fb-border-strong: #33405a;
+  --ws-fb-primary: #6098ff;
+  --ws-fb-primary-soft: #1d2c4d;
+  --ws-fb-danger: #f87171;
+  --ws-fb-danger-soft: #3a1618;
+  --ws-fb-shadow: 0 4px 14px rgb(0 0 0 / 45%);
+  --ws-fb-shadow-hover: 0 6px 14px -4px rgb(0 0 0 / 55%);
+  --ws-fb-checker: #23272f;
+  --ws-fb-checker-bg: #181b21;
+}
+
+/* 3. 作用域内的盒模型重置（不去动 * 选择器，避免影响宿主） ----------------- */
+:where(.ws-panel, .ws-preview, .ws-panel *, .ws-preview *) {
+  box-sizing: border-box;
+}
+
+/* 4. 面板 ------------------------------------------------------------------ */
+.ws-panel {
+  display: flex;
+  flex-direction: column;
+  /* 必须"填满宿主列"：宿主是 flex 容器，若不显式撑开，面板会按内容宽度排布——
+     拖动分隔条时列变宽，面板只会跟着左移而不是变宽（用户反馈的"只改变位置没改变大小"就是这个）。
+     min-width: 0 允许它随列收缩，避免内容反过来把列撑宽。 */
+  flex: 1 1 auto;
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  color: var(--ws-text);
+  background: var(--ws-panel);
+  /* 与表格区同款外观：圆角 + 边框 + 阴影，风格统一 */
+  border: 1px solid var(--ws-border);
+  border-radius: var(--ws-radius-lg, 12px);
+  box-shadow: var(--ws-shadow, 0 1px 2px rgba(15, 23, 42, 0.06));
+  overflow: hidden;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.ws-panel-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--ws-border);
+  border-radius: var(--ws-radius-lg, 12px) var(--ws-radius-lg, 12px) 0 0;
+  background: var(--ws-panel);
+}
+
+/* 「+」挪到工作区右上角：从当前表快速导入 */
+.ws-add {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid var(--ws-border);
+  border-radius: 8px;
+  background: var(--ws-panel);
+  color: var(--ws-muted);
+  cursor: pointer;
+  transition: color var(--ws-dur) var(--ws-ease), border-color var(--ws-dur) var(--ws-ease),
+    background-color var(--ws-dur) var(--ws-ease);
+}
+
+.ws-add:hover {
+  border-color: var(--ws-primary);
+  background: color-mix(in srgb, var(--ws-primary) 10%, transparent);
+  color: var(--ws-primary);
+}
+
+.ws-add:focus-visible {
+  outline: 2px solid var(--ws-primary);
+  outline-offset: 1px;
+}
+
+/* 把「清空」推到最右，「+」紧挨着它 */
+.ws-panel-spacer {
+  flex: 1 1 auto;
+}
+
+.ws-panel-title {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.ws-panel-count {
+  padding: 0 6px;
+  border: 1px solid var(--ws-border);
+  border-radius: 999px;
+  background: var(--ws-panel-soft);
+  color: var(--ws-muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  line-height: 16px;
+}
+
+/* 底部选项条：交互语义开关 + 预览列数 */
+.ws-panel-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  padding: 6px 10px;
+  border-top: 1px solid var(--ws-border);
+  background: var(--ws-panel-soft);
+  border-radius: 0 0 var(--ws-radius-lg, 12px) var(--ws-radius-lg, 12px);
+  color: var(--ws-muted);
+  font-size: 11px;
+}
+
+.ws-opt {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.ws-opt input[type='checkbox'] {
+  width: 13px;
+  height: 13px;
+  accent-color: var(--ws-primary);
+  cursor: pointer;
+}
+
+.ws-opt-cols input[type='number'] {
+  width: 46px;
+  padding: 1px 4px;
+  border: 1px solid var(--ws-border);
+  border-radius: 6px;
+  background: var(--ws-panel);
+  color: var(--ws-text);
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+}
+
+.ws-opt-cols input[type='number']:focus-visible {
+  outline: 2px solid var(--ws-primary);
+  outline-offset: 1px;
+}
+
+/* 条目右键菜单（复制 / 剪切 / 删除） */
+.ws-item-menu {
+  position: fixed;
+  z-index: var(--z-menu, 3200);
+  display: flex;
+  flex-direction: column;
+  min-width: 96px;
+  padding: 4px;
+  border: 1px solid var(--ws-border);
+  border-radius: 10px;
+  background: var(--ws-panel);
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.18);
+}
+
+.ws-item-menu button {
+  padding: 5px 10px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--ws-text);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.ws-item-menu button:hover {
+  background: var(--ws-panel-soft);
+}
+
+.ws-item-menu button.is-danger:hover {
+  background: var(--ws-danger-soft);
+  color: var(--ws-danger);
+}
+
+.ws-clear {
+  padding: 2px 8px;
+  border: 1px solid var(--ws-border);
+  border-radius: var(--ws-radius-sm);
+  background: var(--ws-panel);
+  color: var(--ws-muted);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  transition: color var(--ws-dur) var(--ws-ease), border-color var(--ws-dur) var(--ws-ease),
+    background-color var(--ws-dur) var(--ws-ease);
+}
+
+.ws-clear:hover {
+  border-color: var(--ws-danger);
+  background: var(--ws-danger-soft);
+  color: var(--ws-danger);
+}
+
+.ws-clear:focus-visible {
+  outline: 2px solid var(--ws-primary);
+  outline-offset: 1px;
+}
+
+/* 5. 空状态 ---------------------------------------------------------------- */
+.ws-empty {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  margin: 8px;
+  padding: 18px 14px;
+  min-height: 96px;
+  border: 1px dashed var(--ws-border-strong);
+  border-radius: var(--ws-radius);
+  background: var(--ws-panel-soft);
+  color: var(--ws-muted);
+  font-size: 12px;
+  text-align: center;
+}
+
+.ws-empty-icon {
+  color: var(--ws-faint);
+  font-size: 18px;
+  line-height: 1;
+}
+
+.ws-empty-text {
+  max-width: 12em;
+  line-height: 1.6;
+}
+
+/* 空态里也能直接导入（「+」在右上角，这里给一个更显眼的入口） */
+.ws-empty-add {
+  padding: 3px 10px;
+  border: 1px solid var(--ws-border);
+  border-radius: 999px;
+  background: var(--ws-panel);
+  color: var(--ws-primary);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  transition: border-color var(--ws-dur) var(--ws-ease), background-color var(--ws-dur) var(--ws-ease);
+}
+
+.ws-empty-add:hover {
+  border-color: var(--ws-primary);
+  background: var(--ws-primary-soft);
+}
+
+/* 条目尺寸标签（2×3 这类） */
+.ws-item-size {
+  color: var(--ws-faint);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 6. 列表 ------------------------------------------------------------------ */
+.ws-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  margin: 0;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow: auto;
+  list-style: none;
+  scrollbar-width: thin;
+  scrollbar-color: var(--ws-border-strong) transparent;
+}
+
+/* 7. 卡片 ------------------------------------------------------------------ */
+.ws-item {
+  position: relative; /* 给"待互换"角标定位 */
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid var(--ws-border);
+  border-radius: var(--ws-radius);
+  background: var(--ws-panel);
+  box-shadow: var(--ws-shadow);
+  cursor: grab;
+  user-select: none;
+  /* 触摸：纵向留给列表滚动，横向留给"拖回表格"的手势层 */
+  touch-action: pan-y;
+  transition: border-color var(--ws-dur) var(--ws-ease), box-shadow var(--ws-dur) var(--ws-ease),
+    transform var(--ws-dur) var(--ws-ease);
+}
+
+/* hover：上浮 1px + 主色描边 + 更重的阴影（保留原有交互手感，只换成外壳令牌） */
+.ws-item:hover {
+  border-color: var(--ws-primary);
+  box-shadow: var(--ws-shadow-hover);
+  transform: translateY(-1px);
+}
+
+.ws-item:active {
+  cursor: grabbing;
+  transform: translateY(0);
+}
+
+/**
+ * 「点击互换」模式下已经点过的那一条：主色描边 + 浅色底 + 常驻阴影。
+ * 表格那一边有 Univer 的选区框作反馈，工作区这边必须自己给，否则用户"点了没感觉"。
+ */
+.ws-item.is-pending-swap,
+.ws-item.is-pending-swap:hover {
+  border-color: var(--ws-primary);
+  background: var(--primary-soft, #e8efff);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--ws-primary) 35%, transparent);
+  transform: none;
+}
+
+.ws-item.is-pending-swap::after {
+  content: '待互换 · 再点表格里的一格';
+  position: absolute;
+  inset-inline-end: 6px;
+  inset-block-start: 4px;
+  padding: 1px 5px;
+  border-radius: 6px;
+  background: var(--ws-primary);
+  color: #fff;
+  font-size: 10px;
+  line-height: 1.5;
+  pointer-events: none;
+}
+
+.ws-item:focus-visible {
+  outline: 2px solid var(--ws-primary);
+  outline-offset: 2px;
+}
+
+/* 8. 卡片头部 -------------------------------------------------------------- */
+.ws-item-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.ws-item-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ws-text);
+  font-size: 12px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 删除按钮：默认低调，hover / 键盘聚焦才明显 */
+.ws-item-remove {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--ws-faint);
+  font: inherit;
+  font-size: 14px;
+  line-height: 1;
+  opacity: 0;
+  cursor: pointer;
+  touch-action: manipulation;
+  transition: opacity var(--ws-dur) var(--ws-ease), color var(--ws-dur) var(--ws-ease),
+    border-color var(--ws-dur) var(--ws-ease), background-color var(--ws-dur) var(--ws-ease);
+}
+
+.ws-item:hover .ws-item-remove,
+.ws-item:focus-within .ws-item-remove,
+.ws-item-remove:focus-visible {
+  opacity: 1;
+}
+
+.ws-item-remove:hover {
+  border-color: var(--ws-danger);
+  background: var(--ws-danger-soft);
+  color: var(--ws-danger);
+}
+
+/* 9. 卡片内预览区 ---------------------------------------------------------- */
+.ws-item-preview {
+  border-radius: var(--ws-radius-sm);
+}
+
+/* 紧凑小表格：一次显示 N 列，超出横向滚动（滚动条很细，不抢视觉） */
+.ws-preview {
+  position: relative;
+  border: 1px solid var(--ws-border);
+  border-radius: var(--ws-radius-sm);
+  background-color: var(--ws-panel-soft);
+  overflow: hidden;
+}
+
+.ws-preview-scroll {
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+}
+
+.ws-preview-scroll::-webkit-scrollbar {
+  height: 6px;
+}
+
+.ws-preview-scroll::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: var(--ws-border);
+}
+
+/* 还有被折叠的列/行时，右下角给个小提示 */
+.ws-preview-more {
+  position: absolute;
+  right: 4px;
+  bottom: 2px;
+  padding: 0 4px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--ws-panel) 82%, transparent);
+  color: var(--ws-muted);
+  font-size: 10px;
+  line-height: 14px;
+  pointer-events: none;
+}
+
+/* 缩略图表格本体：白底 + 分离边框（单元格之间有间距，像表格又透气）。
+   纸面与默认字色固定为浅色，不跟随深色主题 —— 见顶部 --ws-sheet-* 变量注释。 */
+.ws-preview-table {
+  background-color: var(--ws-sheet-bg, #ffffff);
+  color: var(--ws-sheet-fg, #1f2937);
+  font: inherit;
+  font-size: 11px;
+}
+
+.ws-preview-table td {
+  padding: 0 4px;
+  overflow: hidden;
+  vertical-align: middle;
+  border-radius: 3px;
+  box-shadow: inset 0 0 0 1px var(--ws-grid-line, rgba(15, 23, 42, 0.09));
+}
+
+/* 10. 来源行 --------------------------------------------------------------- */
+.ws-item-source {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  color: var(--ws-muted);
+  font-size: 11px;
+}
+
+.ws-item-source-label {
+  color: var(--ws-faint);
+}
+
+.ws-item-sheet {
+  overflow: hidden;
+  max-width: 9em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ws-item-sep {
+  color: var(--ws-muted);
+}
+
+.ws-item-a1 {
+  padding: 0 4px;
+  border-radius: 4px;
+  background: var(--ws-panel-soft);
+  color: var(--ws-text);
+  font-family: Consolas, 'Cascadia Mono', ui-monospace, monospace;
+  font-size: 10.5px;
+}
+
+/* 11. 减少动态效果 --------------------------------------------------------- */
+@media (prefers-reduced-motion: reduce) {
+  .ws-item,
+  .ws-clear,
+  .ws-item-remove {
+    transition: none;
+  }
+
+  .ws-item:hover,
+  .ws-item:active {
+    transform: none;
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* 小表格布局：条目 = 一个个独立单元格，按「每行 N 列」排布                        */
+/* -------------------------------------------------------------------------- */
+
+.ws-list {
+  display: grid;
+  gap: 6px;
+  align-content: start;
+  padding: 8px;
+  overflow: auto;
+}
+
+.ws-item {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  padding: 2px;
+  border: 1px solid var(--ws-border);
+  border-radius: var(--ws-radius-sm);
+  background: var(--ws-panel);
+  cursor: grab;
+  transition: border-color var(--ws-dur) var(--ws-ease), box-shadow var(--ws-dur) var(--ws-ease);
+}
+
+.ws-item:hover {
+  border-color: var(--ws-primary);
+  box-shadow: var(--ws-shadow-hover);
+}
+
+.ws-item:active {
+  cursor: grabbing;
+}
+
+/* 单元格本体：内部小表格铺满方块，宽度不够时横向滚动 */
+.ws-item-preview {
+  min-width: 0;
+  overflow: hidden;
+  border-radius: var(--ws-radius-sm);
+}
+
+.ws-item-preview .ws-preview-scroll {
+  background: var(--ws-sheet-bg, #ffffff);
+}
+/* -------------------------------------------------------------------------- */
+/* 搜索 + 来源筛选                                                              */
+/* -------------------------------------------------------------------------- */
+
+.ws-filter {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--ws-border);
+  background: var(--ws-panel-soft);
+}
+
+.ws-search {
+  flex: 1 1 96px;
+  min-width: 0;
+  height: 24px;
+  padding: 0 8px;
+  border: 1px solid var(--ws-border);
+  border-radius: 999px;
+  background: var(--ws-panel);
+  color: var(--ws-text);
+  font: inherit;
+  font-size: 11px;
+}
+
+.ws-search:focus-visible,
+.ws-source:focus-visible {
+  outline: 2px solid var(--ws-primary);
+  outline-offset: 1px;
+}
+
+.ws-source {
+  flex: 0 1 108px;
+  min-width: 0;
+  height: 24px;
+  padding: 0 4px;
+  border: 1px solid var(--ws-border);
+  border-radius: 8px;
+  background: var(--ws-panel);
+  color: var(--ws-text);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.ws-filter-clear {
+  flex: 0 0 auto;
+  height: 24px;
+  padding: 0 8px;
+  border: 1px solid var(--ws-border);
+  border-radius: 999px;
+  background: var(--ws-panel);
+  color: var(--ws-primary);
+  font: inherit;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+
+.ws-filter-clear:hover {
+  border-color: var(--ws-primary);
+  background: var(--ws-primary-soft);
+}
+
+/* 筛选后一条都不剩时的占位（占满整行） */
+.ws-no-match {
+  grid-column: 1 / -1;
+  padding: 14px 8px;
+  color: var(--ws-muted);
+  font-size: 11px;
+  text-align: center;
+}
+
+/* -------------------------------------------------------------------------- */
+/* 清空的二次确认条                                                             */
+/* -------------------------------------------------------------------------- */
+
+.ws-confirm {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 8px;
+  border-bottom: 1px solid var(--ws-border);
+  background: var(--ws-danger-soft);
+}
+
+.ws-confirm-text {
+  flex: 1 1 100%;
+  color: var(--ws-text);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.ws-confirm-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.ws-confirm-btn {
+  height: 24px;
+  padding: 0 10px;
+  border: 1px solid var(--ws-border);
+  border-radius: 999px;
+  background: var(--ws-panel);
+  color: var(--ws-text);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  transition: border-color var(--ws-dur) var(--ws-ease), background-color var(--ws-dur) var(--ws-ease);
+}
+
+.ws-confirm-btn:hover:not(:disabled) {
+  border-color: var(--ws-primary);
+}
+
+.ws-confirm-btn.is-primary {
+  border-color: var(--ws-primary);
+  background: var(--ws-primary);
+  color: #fff;
+}
+
+.ws-confirm-btn.is-danger {
+  border-color: var(--ws-danger);
+  background: var(--ws-danger);
+  color: #fff;
+}
+
+.ws-confirm-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}

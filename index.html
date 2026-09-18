@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" href="data:," />
+    <title>Excel 预览与班级工具</title>
+    <!--
+      首屏骨架（加载速度优化，用户要求"对加载速度进行优化"）。
+
+      为什么写在这里而不是等 React：入口 JS 里装着整个表格引擎（分包后仍有数 MB），
+      以前这段时间页面是**全白**。把骨架直接写进 HTML + 内联关键 CSS，
+      浏览器拿到 2 KB 的 HTML 就能画出"工具栏 + 表格区 + 工作区"的轮廓，
+      用户立刻知道工具在加载，而不是怀疑打不开。
+      React 首次 render 时会替换 #root 的内容，这里不需要任何清理逻辑。
+      `data-app-skeleton` 供 e2e 断言"骨架先于应用出现"。
+    -->
+    <style>
+      :root {
+        color-scheme: light dark;
+      }
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: #f6f8fc;
+        color: #16203a;
+        font-family: system-ui, -apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif;
+      }
+      @media (prefers-color-scheme: dark) {
+        html,
+        body {
+          background: #10151f;
+          color: #e6ebf5;
+        }
+      }
+      .boot-skeleton {
+        display: flex;
+        flex-direction: column;
+        height: 100vh;
+        gap: 10px;
+        padding: 10px 12px;
+        box-sizing: border-box;
+      }
+      .boot-skeleton-bar {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        height: 40px;
+        flex: 0 0 auto;
+      }
+      .boot-skeleton-pill {
+        height: 24px;
+        border-radius: 7px;
+        background: currentColor;
+        opacity: 0.08;
+      }
+      .boot-skeleton-body {
+        display: flex;
+        flex: 1 1 auto;
+        gap: 10px;
+        min-height: 0;
+      }
+      .boot-skeleton-grid {
+        flex: 1 1 auto;
+        border: 1px solid currentColor;
+        border-color: color-mix(in srgb, currentColor 14%, transparent);
+        border-radius: 10px;
+        opacity: 0.5;
+        background-image: linear-gradient(
+            to right,
+            color-mix(in srgb, currentColor 8%, transparent) 1px,
+            transparent 1px
+          ),
+          linear-gradient(to bottom, color-mix(in srgb, currentColor 8%, transparent) 1px, transparent 1px);
+        background-size: 96px 28px;
+      }
+      .boot-skeleton-side {
+        flex: 0 0 240px;
+        border: 1px solid currentColor;
+        border-color: color-mix(in srgb, currentColor 14%, transparent);
+        border-radius: 10px;
+        opacity: 0.35;
+      }
+      .boot-skeleton-hint {
+        flex: 0 0 auto;
+        font-size: 12.5px;
+        opacity: 0.62;
+        letter-spacing: 0.02em;
+      }
+      .boot-skeleton-hint b {
+        font-weight: 600;
+      }
+      @media (max-width: 720px) {
+        .boot-skeleton-side {
+          display: none;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root">
+      <div class="boot-skeleton" data-app-skeleton="1" role="status" aria-live="polite">
+        <div class="boot-skeleton-bar">
+          <span class="boot-skeleton-pill" style="width: 120px"></span>
+          <span class="boot-skeleton-pill" style="width: 72px"></span>
+          <span class="boot-skeleton-pill" style="width: 72px"></span>
+          <span class="boot-skeleton-pill" style="width: 72px"></span>
+          <span class="boot-skeleton-pill" style="flex: 1 1 auto"></span>
+          <span class="boot-skeleton-pill" style="width: 96px"></span>
+        </div>
+        <div class="boot-skeleton-body">
+          <div class="boot-skeleton-grid"></div>
+          <div class="boot-skeleton-side"></div>
+        </div>
+        <p class="boot-skeleton-hint">正在加载表格引擎…（首次打开需要几秒，之后会快很多）</p>
+      </div>
+    </div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
