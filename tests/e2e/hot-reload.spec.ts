@@ -39,6 +39,36 @@ const tabs = (page: Page): Promise<TabInfo[]> =>
 const logKinds = (page: Page): Promise<string[]> =>
   page.evaluate(() => (window as never as { __p0: { log: Array<{ kind: string }> } }).__p0.log.map((entry) => entry.kind));
 
+/** 直接读库：会话里现在存了几个标签（`null` = 还没有任何会话） */
+async function storedTabs(page: Page): Promise<number | null> {
+  return page.evaluate(async (modulePath: string) => {
+    const mod = (await import(/* @vite-ignore */ modulePath)) as {
+      createSessionStore: () => { load: () => Promise<{ tabs: unknown[] } | null> };
+    };
+    const state = await mod.createSessionStore().load();
+    return state ? state.tabs.length : null;
+  }, '/src/persistence/session.ts');
+}
+
+/**
+ * 等**自动保存**真的落盘（**不要写死 sleep**）。
+ *
+ * 为什么：自动保存是"每 2000ms 查一次指纹 + 变化了再去抖 800ms"，所以一次改动最坏要
+ * 2800ms 才进库。原先这里写死 `waitForTimeout(2600)`，正好卡在边界上 —— 相位偏一点就会
+ * 在"还没写"的时候去读，读到 `null`，表现为**随机红**（实测：同一份代码连着两次红，
+ * 只因为导入完成时刻比定时器相位晚了 200ms）。改成轮询：既不再靠猜时间，也仍然是在
+ * 验证"自动保存这条路真的会写库"（而不是用测试钩子强行 flush 把行为绕过去）。
+ */
+async function waitForStoredTabs(page: Page, atLeast: number, timeoutMs = 20_000): Promise<number | null> {
+  const deadline = Date.now() + timeoutMs;
+  let count = await storedTabs(page);
+  while ((count ?? 0) < atLeast && Date.now() < deadline) {
+    await page.waitForTimeout(200);
+    count = await storedTabs(page);
+  }
+  return count;
+}
+
 /** 改一次 App.tsx（触发热更新），并等到 `app:hot-reboot` 落日志；等不到就返回 false（环境不支持 HMR） */
 async function hotReload(page: Page, original: string, round: number): Promise<boolean> {
   writeFileSync(APP_SOURCE, `${original}\n// hot-reload-probe ${round} ${Date.now()}\n`, 'utf8');
@@ -126,8 +156,9 @@ test.describe('热更新后标签页不乱', () => {
     await waitForBoot(page);
 
     await importFixture(page, 'fixture-styles.xlsx');
-    await page.waitForTimeout(2600);
     expect(await tabs(page)).toHaveLength(1);
+    // 等自动保存把这份会话写进库（原来是写死 2600ms，正好卡在 2000+800 的边界上，见上面的说明）
+    expect(await waitForStoredTabs(page, 1), '自动保存应当把这份会话写进库').toBe(1);
 
     // 模拟旧版本留下的坏会话：把同一个标签在 tabs 里写两遍
     const duplicated = await page.evaluate(async (modulePath: string) => {
@@ -148,7 +179,15 @@ test.describe('热更新后标签页不乱', () => {
 
     await page.reload();
     await waitForBoot(page);
-    await page.waitForTimeout(2500);
+    // 等恢复真的跑完（同样不写死 sleep：恢复要建簿，机器忙时会超过 2.5 秒）
+    await page.waitForFunction(
+      () =>
+        (window as never as { __p0: { log: Array<{ kind: string }> } }).__p0.log.some(
+          (entry) => entry.kind === 'session:restore-done',
+        ),
+      null,
+      { timeout: 30_000 },
+    );
 
     const restored = await tabs(page);
     expect(restored, '读回来必须只剩一个标签').toHaveLength(1);

@@ -1,0 +1,88 @@
+/* ============================================================================
+   渲染错误兜底界面（ErrorBoundary）
+   ----------------------------------------------------------------------------
+   只在"渲染期抛异常"时出现，替代 React 默认的"卸载整棵树 → 整页空白"。
+   刻意用最少依赖：不引用外壳令牌（那种时刻样式未必可用），自己写一套朴素但清楚的版式；
+   深浅色跟随 `prefers-color-scheme`。
+   ========================================================================== */
+
+.app-crash {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: #f6f8fc;
+  color: #16203a;
+  font-family: system-ui, -apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif;
+}
+
+@media (prefers-color-scheme: dark) {
+  .app-crash {
+    background: #10151f;
+    color: #e6ebf5;
+  }
+}
+
+.app-crash-card {
+  width: min(520px, 100%);
+  padding: 18px 20px;
+  border: 1px solid color-mix(in srgb, currentColor 16%, transparent);
+  border-radius: 12px;
+  background: color-mix(in srgb, currentColor 4%, transparent);
+  box-shadow: 0 18px 40px rgb(16 24 40 / 16%);
+}
+
+.app-crash-title {
+  margin: 0 0 6px;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.app-crash-text {
+  margin: 0 0 10px;
+  font-size: 12.5px;
+  line-height: 1.7;
+  opacity: 0.8;
+}
+
+.app-crash-detail {
+  max-height: 140px;
+  margin: 0 0 12px;
+  padding: 8px 10px;
+  overflow: auto;
+  border-radius: 8px;
+  background: color-mix(in srgb, currentColor 8%, transparent);
+  font-family: Consolas, 'Cascadia Mono', ui-monospace, monospace;
+  font-size: 11.5px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.app-crash-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.app-crash-btn {
+  height: 30px;
+  padding: 0 14px;
+  border: 1px solid color-mix(in srgb, currentColor 20%, transparent);
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.app-crash-btn.is-primary {
+  border-color: transparent;
+  background: #2563eb;
+  color: #fff;
+}
+
+.app-crash-btn:hover {
+  filter: brightness(1.05);
+}

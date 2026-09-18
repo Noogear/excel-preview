@@ -2,9 +2,21 @@ import { createRoot } from 'react-dom/client';
 
 import { installUndoShortcutPriority } from './shell/undo-shortcut';
 import './shell/shell.css';
+// 兜底卡片（崩溃卡 / 加载失败卡）的样式**静态引入**：加载失败那条路径上 `ErrorBoundary` 模块
+// 可能正是没下来的那一块，样式不能跟着它一起缺席（否则卡片是裸文本，按钮也点不准）。
+import './shell/error-boundary.css';
 
-const container = document.getElementById('root');
-if (!container) throw new Error('#root not found');
+declare global {
+  interface Window {
+    /** `index.html` 里的看门狗（应用挂载成功后撤掉它，避免"卡住了"的误报） */
+    __bootWatchdog?: () => void;
+  }
+}
+
+const rootElement = document.getElementById('root');
+if (!rootElement) throw new Error('#root not found');
+/** 非空版本（下面的闭包里也要用，显式标好类型省得跟 narrow 较劲） */
+const container: HTMLElement = rootElement;
 
 /**
  * 抢在 Univer 引导之前占住 Ctrl+Z / Ctrl+Y 的第一顺位。
@@ -40,7 +52,93 @@ installUndoShortcutPriority();
  */
 performance.mark('app:bundle-loaded');
 
-const { App } = await import('./App');
-performance.mark('app:chunk-loaded');
+/**
+ * **分块加载失败要能自救**（用户反馈："打开文件后，页面是空白的，但是网页刷新后又会出现"）。
+ *
+ * 这一类"刷新就好"的现象里，有一个**能稳定复现**的成因：静态托管（GitHub Pages/Gitee Pages）
+ * 每次发布都会换掉分块的 hash，而用户浏览器里可能还留着**旧的 index.html**（或弱网/代理把分块截断）。
+ * 旧 HTML 指向的 `App-<旧hash>.js` 已经不存在 → 动态 import 直接 reject。以前这里没有任何兜底：
+ * 骨架屏会**永远停在"正在加载表格引擎…"**，用户看到的就是"白屏/打不开"，而按 F5 拿到新 HTML 就好了
+ * —— 和用户描述的一模一样。
+ *
+ * 现在：① 先**自动重来一次**（reload 会重新取 index.html，指向新 hash，通常这一步就好了）；
+ * ② 还不行就摆一张可读的卡片（含原因与「重新加载」），而不是让用户对着灰块干等。
+ * 标记写在 `sessionStorage`：**起来之后清掉**，所以以后真坏了还能再自动救一次；存储不可用时**不**自动
+ * 重试（否则可能刷成死循环）。
+ */
+const RETRY_FLAG = 'app:chunk-retry';
 
-createRoot(container).render(<App />);
+function readRetryFlag(): boolean | null {
+  try {
+    return sessionStorage.getItem(RETRY_FLAG) === '1';
+  } catch {
+    return null; // 隐私模式等场景拿不到存储：当"已经试过"，直接给卡片，绝不死循环
+  }
+}
+
+function writeRetryFlag(value: boolean): void {
+  try {
+    if (value) sessionStorage.setItem(RETRY_FLAG, '1');
+    else sessionStorage.removeItem(RETRY_FLAG);
+  } catch {
+    /* 存储不可用就算了：不影响主流程 */
+  }
+}
+
+/** 连应用主体都下不来时的兜底卡片（不依赖 React —— 它可能正是没下来的那一块） */
+function showBootFailure(detail: string): void {
+  window.__bootWatchdog?.();
+  const card = document.createElement('div');
+  card.className = 'app-crash';
+  card.setAttribute('data-testid', 'boot-failed');
+  card.setAttribute('role', 'alert');
+  const box = document.createElement('div');
+  box.className = 'app-crash-card';
+  const title = document.createElement('h1');
+  title.className = 'app-crash-title';
+  title.textContent = '没能加载应用';
+  const text = document.createElement('p');
+  text.className = 'app-crash-text';
+  text.textContent = '通常是网络中断，或者浏览器缓存了旧版本的页面（发布后地址里的版本号会变）。点下面重新加载即可。';
+  const pre = document.createElement('pre');
+  pre.className = 'app-crash-detail';
+  pre.setAttribute('data-testid', 'boot-failed-detail');
+  pre.textContent = detail;
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'app-crash-btn is-primary';
+  button.setAttribute('data-testid', 'app-crash-reload');
+  button.textContent = '重新加载';
+  button.addEventListener('click', () => window.location.reload());
+  const actions = document.createElement('div');
+  actions.className = 'app-crash-actions';
+  actions.append(button);
+  box.append(title, text, pre, actions);
+  card.append(box);
+  container.replaceChildren(card);
+}
+
+async function boot(): Promise<void> {
+  try {
+    const { App } = await import('./App');
+    const { AppErrorBoundary } = await import('./shell/ErrorBoundary');
+    performance.mark('app:chunk-loaded');
+    writeRetryFlag(false); // 起来了就清标记：下次再坏还能自动救一次
+    createRoot(container).render(
+      <AppErrorBoundary>
+        <App />
+      </AppErrorBoundary>,
+    );
+    window.__bootWatchdog?.();
+  } catch (error) {
+    const detail = String((error as { message?: string } | null)?.message ?? error);
+    if (readRetryFlag() === false) {
+      writeRetryFlag(true);
+      window.location.reload();
+      return;
+    }
+    showBootFailure(detail);
+  }
+}
+
+void boot();

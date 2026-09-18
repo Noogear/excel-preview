@@ -159,6 +159,16 @@ const QUICK_ADD_WINDOW_MS = 3000;
  * "放下/取消"，少一个隐式动作更不容易误触（真要加入就切到选择模式，或直接把选区拖进工作区）。
  */
 const QUICK_ADD_MODES: readonly InteractionMode[] = ['select', 'click-swap'];
+/**
+ * 「活动单元画到画布上了没有」的**首帧等待窗口**（毫秒）。
+ *
+ * Univer 的绘制是异步的：导入/切标签刚结束那一瞬间画布往往还没提交首帧。
+ * 立刻断言"画布宽度为 0 ⇒ 白屏"会误报（早期自检版本就犯过这个错），
+ * 所以先逐帧轮询等一会儿；健康路径上第一次测量就通过，等于零开销。
+ */
+const RENDER_SETTLE_MS = 600;
+/** 重绑之后**再**给它多久把首帧画出来（超过就记 `render:rebind-failed`，用户按 F5 仍可恢复） */
+const RENDER_REBIND_MS = 1200;
 /** 抓滚动条滑块的容差（px）：滑块只有几像素宽，偏一点也要算"抓住了" */
 const SCROLLBAR_GRAB_TOLERANCE_PX = 6;
 /**
@@ -257,6 +267,33 @@ export function App() {
   const workspacePressRef = useRef<{ x: number; y: number } | null>(null);
   /** 最近一次"快速加入"用的选区（同一次选区只加一次，避免连点收两遍） */
   const lastQuickAddRef = useRef<{ key: string; at: number } | null>(null);
+  /**
+   * **单元级操作的串行闸**（用户反馈："打开文件后页面是空白的，刷新后又会出现"）。
+   *
+   * 为什么会空白：有三条路径都会"新建/绑定工作簿并重挂表依赖"——
+   *   ① 打开文件（`handleFile` → `api.createWorkbook` + `attachSheetDeps`）；
+   *   ② 冷标签重建（`activateTab` → `buildTabUnit`，解析大文件要几秒）；
+   *   ③ 会话恢复（`restoreSession` 末尾也会 `activateTab`）。
+   * 以前它们可以**交错**执行：用户在"冷标签正在重建"或"启动恢复还没跑完"时去打开文件，
+   * 两个 `createWorkbook` 与两次 `attachSheetDeps` 就会互相穿插，活动单元与画布绑定的单元错位
+   * → 舞台一片空白；刷新后只有恢复这一条路径，于是又正常了。
+   *
+   * 现在把这三条路径排进同一条 Promise 链：**一次只跑一个**，后续的自动排在后面（用户动作不会丢，
+   * 只是等前面那一步做完）。闸门只圈"会动工作簿"的异步段，不圈 UI 状态更新。
+   */
+  const unitOpsRef = useRef<Promise<unknown>>(Promise.resolve());
+  const runUnitOp = useCallback(<T,>(label: string, fn: () => Promise<T> | T): Promise<T> => {
+    const next = unitOpsRef.current.then(
+      () => fn(),
+      () => fn(),
+    );
+    unitOpsRef.current = next.catch(() => undefined);
+    next.then(
+      () => log('unit-op:done', { label }),
+      (error) => log('unit-op:error', { label, message: String(error) }),
+    );
+    return next;
+  }, []);
   /** `handleWorkspaceItemClick` 的 ref 版本（指针监听装配得比它早） */
   const handleWorkspaceItemClickRef = useRef<(item: RangeSnapshot) => void>(() => {});
   const dropHandlerRef = useRef<(payload: DragPayload, target: DropTarget | null, pointer: { x: number; y: number }) => void>(() => {});
@@ -2196,6 +2233,8 @@ export function App() {
         setItems,
         toast,
         getSheet,
+        // 注意：它在本组件里声明得比这个 effect 晚（第 2700 行附近）。闭包延迟取值，运行时早就初始化好了。
+        ensureActiveUnitRendered,
       });
 
       // ---------------------------------------------------------------- 文件拖放打开
@@ -2574,7 +2613,18 @@ export function App() {
   /** 切换到某个标签：冷标签先重建，再设为当前单元并重装锁与元信息 */
   const activateTab = useCallback(
     (id: string) => {
-      const switchTo = (): void => {
+      /**
+       * 走串行闸（见 `unitOpsRef` 的说明）：冷标签切换要重建工作簿，绝不能和"打开文件/会话恢复"并行。
+       * 顺序也顺带变直了：先 `await` 重建，成功后再切；不再"先切过去、后面再补建"。
+       */
+      void runUnitOp('activate-tab', async () => {
+        if (needsBuild(tabRuntimeRef.current, id)) {
+          const ok = await buildTabUnit(id);
+          if (!ok) {
+            log('tab:activate-skip', { id, reason: 'build-failed' });
+            return;
+          }
+        }
         clearSwapFlashRef.current(); // 黄色提醒框属于上一张表的坐标系，切表即收掉
         // 切走之前先把**即将离开的那个标签**的编辑落一次（此时 active 还是它）。
         // 冷存发生在切走之后，那时再读"活动簿"就读错对象了（实测踩过）。
@@ -2595,18 +2645,10 @@ export function App() {
         tabRuntimeRef.current = markTabUsed(tabRuntimeRef.current, id, Date.now());
         log('tab:activate', { id, fileName: tab?.fileName ?? null });
         enforceResidentWindow(id);
-      };
-
-      if (needsBuild(tabRuntimeRef.current, id)) {
-        void buildTabUnit(id).then((ok) => {
-          if (ok) switchTo();
-          else log('tab:activate-skip', { id, reason: 'build-failed' });
-        });
-        return;
-      }
-      switchTo();
+        await ensureActiveUnitRendered(id);
+      });
     },
-    [attachSheetDeps, buildTabUnit, enforceResidentWindow, refreshSheetMeta],
+    [attachSheetDeps, buildTabUnit, enforceResidentWindow, refreshSheetMeta, runUnitOp],
   );
 
   const closeTab = useCallback(
@@ -2681,6 +2723,65 @@ export function App() {
       log('focus:error', { id, message: String(error) });
     }
   }, []);
+
+  /**
+   * **兜底自愈**：确认"活动标签 = 画布上真正渲染的那个工作簿"，不是就重新绑一次。
+   *
+   * 用户反馈"打开文件后页面是空白的，刷新后又会出现"—— 这一类现象的共同点都是
+   * **活动单元与渲染单元错位**（并发建簿、浏览器把标签冻结/丢弃后再激活、渲染单元被提前释放…）。
+   * 刷新之所以能好，是因为恢复路径每次都是"干净地重建 + 绑定"。
+   *
+   * 与其猜是哪一条触发，不如在每次"会动工作簿"的操作结束后**验一次、不对就修**：
+   *  ① 先**等一会儿再判**（最多 `RENDER_SETTLE_MS`，逐帧轮询）：绘制是异步的，给首帧留时间；
+   *  ② 真的不对 → 重绑（`setCurrentUnitForType` + 聚焦 + 重挂表依赖，与切标签同款动作），
+   *     并 `window.dispatchEvent(new Event('resize'))` **催一次布局**：Univer 的 canvas 尺寸靠
+   *     容器尺寸通知驱动，若绑定发生时容器正好是 0 宽/被隐藏，不补这一次通知它就一直 0×0（舞台空白）；
+   *  ③ 再等 `RENDER_REBIND_MS` 复验，仍不对才记 `render:rebind-failed`（按 F5 也能靠会话恢复回来）。
+   *
+   * 健康路径**零开销**：第一次测量就通过 → 不 await、不打日志、不做任何多余动作。
+   */
+  const ensureActiveUnitRendered = useCallback(
+    async (id: string): Promise<boolean> => {
+      const measure = (): { ok: boolean; active: string | null; canvasWidth: number } => {
+        try {
+          const active = apiRef.current?.getActiveWorkbook()?.getId?.() ?? null;
+          const canvases = Array.from(document.querySelectorAll<HTMLCanvasElement>('#univer-container canvas'));
+          const canvasWidth = canvases.reduce((max, canvas) => Math.max(max, Math.round(canvas.getBoundingClientRect().width)), 0);
+          return { ok: active === id && canvasWidth > 20, active, canvasWidth };
+        } catch (error) {
+          log('render:check-error', { id, message: String(error) });
+          return { ok: false, active: null, canvasWidth: 0 };
+        }
+      };
+      const settle = async (timeoutMs: number): Promise<{ ok: boolean; active: string | null; canvasWidth: number }> => {
+        const deadline = Date.now() + timeoutMs;
+        let state = measure();
+        while (!state.ok && Date.now() < deadline) {
+          await new Promise<void>((resolve) => {
+            window.setTimeout(resolve, 32);
+          });
+          state = measure();
+        }
+        return state;
+      };
+
+      const first = await settle(RENDER_SETTLE_MS);
+      if (first.ok) return true;
+      log('render:rebind', { id, active: first.active, canvasWidth: first.canvasWidth });
+      try {
+        instanceServiceRef.current?.setCurrentUnitForType(id);
+        focusSheetUnit(id);
+        attachSheetDeps();
+        window.dispatchEvent(new Event('resize')); // 见上面 ②：催布局，专治 canvas 停在 0×0
+      } catch (error) {
+        log('render:rebind-error', { id, message: String(error) });
+      }
+      const after = await settle(RENDER_REBIND_MS);
+      if (!after.ok) log('render:rebind-failed', { id, active: after.active, canvasWidth: after.canvasWidth });
+      return after.ok;
+    },
+    [attachSheetDeps, focusSheetUnit],
+  );
 
   /**
    * 把**指定标签**上被改过的单元格读出来，累积进 `editsByTab`。
@@ -2830,6 +2931,13 @@ export function App() {
         setStatusText(`打不开 ${file.name}：${hint}`);
         return;
       }
+      /**
+       * 校验通过后进**串行闸**再动手（见 `unitOpsRef` 的说明）：
+       * 用户在"冷标签正在重建"或"启动恢复还没跑完"时打开文件，两条路径会同时
+       * `createWorkbook` + `attachSheetDeps`，把活动单元与画布绑定搞错位 → 页面空白、刷新才恢复。
+       * 排队后：前一步做完再建新簿，顺序确定，也就不会再错位。
+       */
+      await runUnitOp('import', async () => {
       // 埋点：用户"选中文件"这一刻。配合 import:done 就能算出端到端墙钟时间
       // （解析/转换/渲染各段耗时已在 summary 里分项记录，这里补的是总时长基准点）
       log('import:start', { name: file.name, size: file.size });
@@ -2931,6 +3039,8 @@ export function App() {
 
         attachSheetDeps();
         syncTabs();
+        // 建完簿、挂完依赖再验一次"画布上渲染的确实是这个新标签"，不对就重绑（见 ensureActiveUnitRendered）
+        await ensureActiveUnitRendered(tabId);
 
         const cells = parsed.sheets.reduce((sum, s) => sum + s.cells.length, 0);
         const parsedFeatures: ParsedFeatureCounts = parsed.sheets.reduce<ParsedFeatureCounts>(
@@ -2976,8 +3086,9 @@ export function App() {
         setStatusText(`导入失败：${String(error)}`);
         log('import:error', { message: String(error), stack: (error as Error)?.stack });
       }
+      });
     },
-    [attachSheetDeps, enforceResidentWindow],
+    [attachSheetDeps, enforceResidentWindow, ensureActiveUnitRendered, runUnitOp],
   );
   // 窗口级文件拖放走同一条导入路径（见引导 effect 里的 file:drop 处理）
   fileOpenerRef.current = (file: File) => void handleFile(file);
@@ -4506,6 +4617,8 @@ interface TestHooksDeps {
   ) => void;
   /** 选区右下角"填充柄"的当前状态（测试断言它确实没在画，见 src/univer/fill-handle.ts） */
   fillHandleState: () => { available: boolean; controls: number; enabled: boolean[]; visible: (boolean | null)[] };
+  /** 自愈动作本体（见它的注释）：e2e 造出"绑定错位"后调它，验证真的能接回来 */
+  ensureActiveUnitRendered: (id: string) => Promise<boolean>;
 }
 function installTestHooks(deps: TestHooksDeps): void {
   const { apiRef, getSheet } = deps;
@@ -4556,6 +4669,8 @@ function installTestHooks(deps: TestHooksDeps): void {
     /** 主视口滚动量（滚动条/滚轮用例断言"拖一下真的滚了、而且是一格一格连续滚"） */
     getScrollState: () => deps.getMainViewportScroll(),
     getActiveTabId: () => deps.activeTabIdRef.current,
+    /** 直接触发自愈动作（`ensureActiveUnitRendered`），供 e2e 验证"绑定错位真的能被修回来" */
+    healActiveUnit: (id: string) => deps.ensureActiveUnitRendered(id),
     getMode: () => deps.modeRef.current,
     /** 当前撤销/重做可用次数（历史跳步与诊断用） */
     getUndoRedoCounts: () => deps.undoRedoCountsRef.current,
@@ -4564,7 +4679,20 @@ function installTestHooks(deps: TestHooksDeps): void {
       deps.snapshotActiveEditsRef.current();
       return deps.sessionSaverRef.current?.flush() ?? Promise.resolve();
     },
-    getActiveWorkbookId: () => apiRef.current?.getActiveWorkbook()?.getWorkbook().getUnitId() ?? null,
+    /**
+     * **画布此刻真正绑定的工作簿 id**（Univer 层的"当前单元"，不是应用层的活动标签）。
+     *
+     * 两者不一致就是"白屏"那一类故障的核心特征：应用以为在看 A，画布画的是 B（或什么都没画，
+     * 例如当前单元指向一个已被释放的簿）。`blank-page-guard` 用它断言"自愈后绑定确实接回来了"。
+     * 没有活动簿时**不抛异常**（以前这里会 `TypeError`，调用方拿不到"其实是空的"这个信息）。
+     */
+    getActiveWorkbookId: () => {
+      try {
+        return apiRef.current?.getActiveWorkbook()?.getWorkbook().getUnitId() ?? null;
+      } catch {
+        return null;
+      }
+    },
     getDirtySummary: () =>
       deps.tabsRef.current.map((tab) => ({ id: tab.id, dirtyCells: dirtyCellCount(tab.id) })),
     /** 直接派发任意命令（用于验证"破坏性命令全被拦下"）；返回命令结果 */
