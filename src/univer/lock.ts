@@ -93,11 +93,6 @@ export interface ContentOnlyLock {
   allowedCount: () => number;
   /** 被 mutation 层剥离掉样式的单元格次数 */
   strippedCount: () => number;
-  /**
-   * 被写入过的单元格（sheetId → `row:col` 集合）。
-   * 外科式导出据此**只回写这些格子**，其余部件字节原样保留。
-   */
-  getDirtyCells: () => Map<string, Set<string>>;
   restore: () => void;
 }
 
@@ -107,24 +102,20 @@ export function installContentOnlyLock(fWorksheet: FWorksheet): ContentOnlyLock 
   let blocked = 0;
   let allowed = 0;
   let stripped = 0;
-  /** sheetId → 被写过的单元格坐标集合（导出用） */
-  const dirtyCells = new Map<string, Set<string>>();
 
+  /**
+   * 把这次 mutation 写过的格子记进**全局**脏格账本（按 workbookId 归档）。
+   *
+   * 这里以前还额外维护一份"挂在本锁实例上"的 `dirtyCells`，并对外暴露 `getDirtyCells()`；
+   * 但全仓没有任何地方读它（外科式导出读的是 `dirty-tracker` 里的全局账本，为的就是
+   * 多标签/切表都不丢记录），于是它只是让每个被改过的格子**多占一份字符串**。
+   * 已删除，避免"同一件事记两遍"造成误解与浪费。
+   */
   function recordDirty(params?: ISetRangeValuesMutationParams): void {
-    if (!params?.cellValue || !params.subUnitId) return;
-    let bucket = dirtyCells.get(params.subUnitId);
-    if (!bucket) {
-      bucket = new Set<string>();
-      dirtyCells.set(params.subUnitId, bucket);
-    }
+    if (!params?.cellValue || !params.subUnitId || !params.unitId) return;
     for (const [rowKey, row] of Object.entries(params.cellValue as Record<number, Record<number, unknown>>)) {
       for (const colKey of Object.keys(row ?? {})) {
-        bucket.add(`${rowKey}:${colKey}`);
-        // 同时写入**全局**追踪（按 workbookId 归档）：多标签/切表后仍然知道哪些格子被改过，
-        // 外科式导出与"误关闭恢复"都依赖它
-        if (params.unitId) {
-          recordGlobalDirtyCell(params.unitId, params.subUnitId, Number(rowKey), Number(colKey));
-        }
+        recordGlobalDirtyCell(params.unitId, params.subUnitId, Number(rowKey), Number(colKey));
       }
     }
   }
@@ -197,7 +188,6 @@ export function installContentOnlyLock(fWorksheet: FWorksheet): ContentOnlyLock 
     blockedCount: () => blocked,
     allowedCount: () => allowed,
     strippedCount: () => stripped,
-    getDirtyCells: () => dirtyCells,
     restore: () => disposables.forEach((d) => d.dispose()),
   };
 }

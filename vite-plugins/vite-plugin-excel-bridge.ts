@@ -41,10 +41,20 @@ const EXTENSION: Record<string, string> = {
 
 /** 单次转换的请求体上限（Excel 侧也吃不下更大的；正常班级表远小于它） */
 const MAX_BYTES = 64 * 1024 * 1024;
-/** 单次转换超时（毫秒）：大表 + Excel 冷启动，给足 60 秒 */
-const CONVERT_TIMEOUT_MS = 60_000;
-/** 健康探测超时（毫秒） */
-const PROBE_TIMEOUT_MS = 20_000;
+/**
+ * 单次转换超时（毫秒）。
+ *
+ * 为什么从 60 秒放宽到 180 秒（实测踩到的坑）：Excel 冷启动 + 大表 SaveAs 在慢机器上会超过 60 秒
+ * （实测一次 60.36 秒，**刚好越过旧上限**）。而超时是"强杀"路径：杀了 PowerShell，
+ * 脚本里的 `finally { $excel.Quit() }` 就没机会执行 → 留下一个看不见的 EXCEL.EXE。
+ * 于是"超时 → 残留 → 机器更慢 → 更容易超时"形成正反馈（实测攒到过 57 个残留进程）。
+ * 现在双管齐下：上限放宽 + 超时按 PID 精确收拾（见 killExcelByPid）。
+ */
+const CONVERT_TIMEOUT_MS = 180_000;
+/** 健康探测超时（毫秒）：冷启动 Excel 也可能十几秒，给足 */
+const PROBE_TIMEOUT_MS = 60_000;
+/** 探测**失败**结果的缓存时长：只挡住"连点两下"的重复探测，不至于把瞬时失败钉死一整个会话 */
+const NEGATIVE_PROBE_TTL_MS = 5_000;
 
 interface ProbeResult {
   available: boolean;
@@ -61,7 +71,37 @@ interface BridgeOptions {
   log?: (message: string) => void;
 }
 
-function runPowerShell(args: string[], timeoutMs: number): Promise<{ code: number; stdout: string; stderr: string }> {
+/**
+ * 我们这次启动的 Excel 进程登记表（PID）。
+ *
+ * 用途：超时强杀 PowerShell 时，`finally` 里的 `Quit()` 跑不到，必须由中间件按 PID 收拾；
+ * 另外服务器退出时（`httpServer` 的 close）也用它兜一次底。
+ * 只登记"我们确认新起出来"的 PID（脚本用创建前后差集判断），所以不会误杀用户自己开的 Excel。
+ */
+const spawnedExcelPids = new Set<number>();
+
+/** 按 PID 强杀一个 Excel（超时路径 / 退出兜底）。杀不掉就忽略——不能让它影响请求结果 */
+function killExcelByPid(pid: number): void {
+  if (!Number.isInteger(pid) || pid <= 0) return;
+  try {
+    const killer = spawn('taskkill', ['/PID', String(pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' });
+    killer.on('error', () => undefined);
+    killer.on('close', () => undefined);
+  } catch {
+    /* 杀不掉就算了：脚本侧还有一次 Stop-Process 兜底 */
+  }
+  spawnedExcelPids.delete(pid);
+}
+
+/** 退出兜底：把我们起过的 Excel 全部收掉（正常情况下它们早就被脚本 Quit 了） */
+function killAllSpawnedExcel(): void {
+  for (const pid of [...spawnedExcelPids]) killExcelByPid(pid);
+}
+
+function runPowerShell(
+  args: string[],
+  timeoutMs: number,
+): Promise<{ code: number; stdout: string; stderr: string }> {
   return new Promise((fulfil) => {
     const child = spawn('pwsh', ['-NoProfile', '-NonInteractive', '-File', ...args], {
       windowsHide: true,
@@ -69,22 +109,54 @@ function runPowerShell(args: string[], timeoutMs: number): Promise<{ code: numbe
     });
     let stdout = '';
     let stderr = '';
+    /** 脚本起来后会把 Excel 的 PID 作为**第一行**报出来（见 excel-bridge.ps1 的说明） */
+    let excelPid: number | null = null;
+    let settled = false;
+    const capturePid = (chunk: string): void => {
+      if (excelPid !== null) return;
+      for (const line of chunk.split(/\r?\n/)) {
+        if (!line.includes('excel-pid')) continue;
+        try {
+          const parsed = JSON.parse(line) as { bridge?: string; pid?: number };
+          if (parsed.bridge === 'excel-pid' && typeof parsed.pid === 'number') {
+            excelPid = parsed.pid;
+            spawnedExcelPids.add(parsed.pid);
+          }
+        } catch {
+          /* 半行/脏行，等下一块数据 */
+        }
+      }
+    };
     const timer = setTimeout(() => {
+      settled = true;
       child.kill();
-      fulfil({ code: -1, stdout, stderr: `${stderr}\n[bridge] 超时 ${timeoutMs}ms，已结束` });
+      /**
+       * **关键**：进程被杀 = 脚本的 `finally` 不会执行 → Excel 不会被 Quit。
+       * 所以这里按 PID 精确补一刀，否则每次超时都留下一个看不见的 EXCEL.EXE。
+       */
+      if (excelPid !== null) killExcelByPid(excelPid);
+      fulfil({ code: -1, stdout, stderr: `${stderr}\n[bridge] 超时 ${timeoutMs}ms，已结束（并已清理 Excel${excelPid ? ` #${excelPid}` : ''}）` });
     }, timeoutMs);
     child.stdout?.on('data', (chunk) => {
-      stdout += String(chunk);
+      const text = String(chunk);
+      stdout += text;
+      capturePid(text);
     });
     child.stderr?.on('data', (chunk) => {
       stderr += String(chunk);
     });
     child.on('error', (error) => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
       fulfil({ code: -1, stdout, stderr: `${stderr}\n${String(error)}` });
     });
     child.on('close', (code) => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
+      // 正常结束：脚本自己已经 Quit 了，这里只把登记表清掉
+      if (excelPid !== null) spawnedExcelPids.delete(excelPid);
       fulfil({ code: code ?? -1, stdout, stderr });
     });
   });
@@ -113,15 +185,25 @@ async function readBody(req: Connect.IncomingMessage, limit = MAX_BYTES): Promis
 export function excelBridgePlugin(options: BridgeOptions): Plugin {
   const script = resolve(options.root, 'tools', 'excel-bridge.ps1');
   const note = options.log ?? (() => {});
-  /** 探测结果缓存（Excel 装没装不会中途变） */
+  /**
+   * 探测结果缓存。
+   *
+   * 成功结果**长期缓存**（"本机装没装 Excel"不会中途变）；
+   * 失败结果只缓存 `NEGATIVE_PROBE_TTL_MS` 一小会儿 —— 实测踩过：探测会因为"Excel 正忙 / 冷启动慢"
+   * 这类**瞬时**原因失败，而以前失败也被永久缓存，于是这一整个开发服务器会话里桥都显示"不可用"，
+   * 只能重启服务才能恢复（本次开发中就撞上一次）。给个短 TTL，让它自己缓过来。
+   */
   let probe: ProbeResult | null = null;
+  let probeFailedAt = 0;
   /** Excel COM 不能并发：转换串行排队 */
   let queue: Promise<unknown> = Promise.resolve();
 
   async function probeExcel(): Promise<ProbeResult> {
-    if (probe) return probe;
+    if (probe?.available) return probe;
+    if (probe && !probe.available && Date.now() - probeFailedAt < NEGATIVE_PROBE_TTL_MS) return probe;
     if (!existsSync(script)) {
       probe = { available: false, reason: `找不到转换脚本 ${script}` };
+      probeFailedAt = Date.now();
       return probe;
     }
     const result = await runPowerShell([script, '-Probe'], PROBE_TIMEOUT_MS);
@@ -135,6 +217,7 @@ export function excelBridgePlugin(options: BridgeOptions): Plugin {
         reason: '探测本机 Excel 失败（未安装 Excel，或 PowerShell 无法启动 COM）',
       };
     }
+    if (!probe.available) probeFailedAt = Date.now();
     note(`[excel-bridge] 探测结果：${JSON.stringify(probe)}`);
     return probe;
   }
@@ -214,6 +297,11 @@ export function excelBridgePlugin(options: BridgeOptions): Plugin {
     apply: () => options.form === 'local',
     configureServer(server) {
       server.middlewares.use(middleware);
+      /**
+       * 服务器退出时兜一次底：把我们起过、但还活着的 Excel 收掉。
+       * （正常路径下脚本自己已经 Quit 了，这里只防"超时强杀"那种漏网。）
+       */
+      server.httpServer?.on('close', killAllSpawnedExcel);
       // vitest 也会起一个 Vite server，这里不必刷屏
       if (!process.env.VITEST) {
         note(
@@ -223,6 +311,7 @@ export function excelBridgePlugin(options: BridgeOptions): Plugin {
     },
     configurePreviewServer(server) {
       server.middlewares.use(middleware);
+      server.httpServer?.on('close', killAllSpawnedExcel);
     },
   };
 }

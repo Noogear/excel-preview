@@ -10,7 +10,47 @@ export type DirtyKey = string;
 
 const dirtyByWorkbook = new Map<string, Map<string, Set<DirtyKey>>>();
 
+/**
+ * 记账开关（默认开）。**应用特性时要关掉**。
+ *
+ * 为什么需要（真实缺陷）：导入时我们会在"可信代码路径"里应用条件格式 / 数据验证 / 超链接 /
+ * 批注 / 图片，其中一些会写单元格（超链接是写进单元格的富文本）。这些写入同样会经过
+ * `lock.ts` 的 mutation 包装 → 被记成"脏格"，于是**刚打开的文件立刻显示"未保存"**，
+ * 而且在导出时被当成"用户改过的格子"去回写（本来可以原样保留的 XML 被重写）。
+ * 暂停后：脏格集合只反映**用户真正改过的格子**，标签状态与外科式导出的范围都回到正确口径。
+ *
+ * 用**计数**而不是布尔：暂停/恢复可能嵌套（导入与冷标签重建都可能同时进行），
+ * 计数器保证"谁暂停谁恢复"不会互相提前打开。
+ */
+let pauseDepth = 0;
+
+export function pauseDirtyTracking(): void {
+  pauseDepth += 1;
+}
+
+export function resumeDirtyTracking(): void {
+  if (pauseDepth > 0) pauseDepth -= 1;
+}
+
+export function isDirtyTrackingPaused(): boolean {
+  return pauseDepth > 0;
+}
+
+/**
+ * 在"暂停记账"的区间里跑一段异步逻辑（异常也保证恢复）。
+ * 应用特性用它，避免每处调用都写一遍 try/finally。
+ */
+export async function withDirtyTrackingPaused<T>(work: () => Promise<T>): Promise<T> {
+  pauseDirtyTracking();
+  try {
+    return await work();
+  } finally {
+    resumeDirtyTracking();
+  }
+}
+
 export function recordDirtyCell(workbookId: string, sheetId: string, row: number, col: number): void {
+  if (pauseDepth > 0) return;
   let sheets = dirtyByWorkbook.get(workbookId);
   if (!sheets) {
     sheets = new Map<string, Set<DirtyKey>>();

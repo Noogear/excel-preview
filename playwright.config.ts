@@ -22,7 +22,6 @@ import { defineConfig, devices } from '@playwright/test';
  */
 /** 串行项目里的用例（会互相干扰，或本身在测"负载下的时序"） */
 const SENSITIVE = [
-  '**/hot-reload.spec.ts',
   '**/perf.spec.ts',
   '**/tabs-memory.spec.ts',
   '**/static-form.spec.ts',
@@ -33,6 +32,19 @@ const SENSITIVE = [
    */
   '**/clipboard.spec.ts',
 ];
+
+/**
+ * **单独一个进程**跑的用例（不是"串行"能解决的）。
+ *
+ * 为什么必须独立进程（实测查出来的）：`hot-reload.spec.ts` 会**改写 `src/App.tsx`** 触发真实热更新，
+ * 它和 `perf.spec.ts`（百万格）**同处一个 playwright 进程**时，用例全部通过、但**进程永远不退出**
+ * （实测：各自单跑都秒退；`hot-reload + perf` 一起跑就挂住；`clipboard + date-cells` 这种组合正常）。
+ * 二分过程见 `P3-内容锁定与工作区-交付说明.md` 的「修复 AA」。
+ *
+ * 所以这里是**三次独立调用**（`npm run e2e` = main → sensitive → hot-reload，各自一个新进程），
+ * 而不是把它塞进某个项目里 —— 换项目也还在同一个进程里，解决不了。
+ */
+const HOT_RELOAD = ['**/hot-reload.spec.ts'];
 
 export default defineConfig({
   testDir: './tests/e2e',
@@ -62,7 +74,8 @@ export default defineConfig({
       name: 'main',
       // 文件内也并发：每个 test 独立上下文，互不共享状态
       fullyParallel: true,
-      testIgnore: SENSITIVE,
+      // 串行用例与"改写源码"的热更新用例都不进 main
+      testIgnore: [...SENSITIVE, ...HOT_RELOAD],
       // 直接用系统已安装的 Chrome，避免下载 Playwright 自带 Chromium（内网/受限网络下更快）
       use: { ...devices['Desktop Chrome'], channel: 'chrome' },
     },
@@ -70,6 +83,13 @@ export default defineConfig({
       name: 'sensitive',
       fullyParallel: false,
       testMatch: SENSITIVE,
+      use: { ...devices['Desktop Chrome'], channel: 'chrome' },
+    },
+    {
+      /** 单独一个进程跑（见 HOT_RELOAD 的说明）：`npm run e2e:hot-reload` */
+      name: 'hot-reload',
+      fullyParallel: false,
+      testMatch: HOT_RELOAD,
       use: { ...devices['Desktop Chrome'], channel: 'chrome' },
     },
   ],

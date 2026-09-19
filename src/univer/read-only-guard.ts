@@ -171,14 +171,31 @@ interface CommandServiceLike {
 }
 
 /**
+ * 已经装过闸门的命令服务 → 句柄。
+ *
+ * 为什么需要：`installReadOnlyGuard` 是**猴补**（直接改实例上的方法），装两次就会包两层，
+ * 而且第一层的 `restore()` 会把第二层的包装一起抹掉（两边都想还原"自己记下的原始方法"）。
+ * 以前只靠调用方"每次 boot 只装一次"的自觉；现在这里兜住：同一个服务重复安装直接返回同一个句柄。
+ * 用 `WeakMap` 而不是给服务挂属性：不给上游对象留我们的痕迹，也不会阻止它被回收。
+ */
+const installedGuards = new WeakMap<object, ReadOnlyGuard>();
+
+/**
  * 安装闸门。传入**根 injector**（`univer.__getInjector()`）——命令服务是全局单例，
  * 装一次即可覆盖所有工作表与所有标签页。
  */
 export function installReadOnlyGuard(injector: { get: (token: unknown) => unknown }): ReadOnlyGuard {
   const commandService = injector.get(ICommandService) as CommandServiceLike;
+  const existing = installedGuards.get(commandService);
+  if (existing) return existing;
+
   const blocked = new Map<string, number>();
   let suspended = false;
+  let restored = false;
 
+  /** 包装前的**自有属性描述符**（没有自有属性说明方法来自原型，restore 时要把我们加的自有属性删掉） */
+  const ownExecute = Object.getOwnPropertyDescriptor(commandService, 'executeCommand');
+  const ownSyncExecute = Object.getOwnPropertyDescriptor(commandService, 'syncExecuteCommand');
   const originalExecute = commandService.executeCommand.bind(commandService);
   const originalSyncExecute = commandService.syncExecuteCommand.bind(commandService);
 
@@ -202,7 +219,7 @@ export function installReadOnlyGuard(injector: { get: (token: unknown) => unknow
     return originalSyncExecute(id, params, options);
   };
 
-  return {
+  const guard: ReadOnlyGuard = {
     blockedIds: () => new Map(blocked),
     blockedCount: () => [...blocked.values()].reduce((sum, n) => sum + n, 0),
     isAllowed: isCommandAllowed,
@@ -213,10 +230,24 @@ export function installReadOnlyGuard(injector: { get: (token: unknown) => unknow
       suspended = false;
     },
     isSuspended: () => suspended,
+    /**
+     * 拆掉猴补。
+     *
+     * 这里按"包装前是不是自有属性"分别处理：原来是自有属性就还原那份描述符，
+     * 原来在原型上就**删掉**我们加的自有属性（以前是写成 bind 后的副本，等于永远留了一层自有属性
+     * 盖住原型方法 —— 有界但不是"干净还原"，而且重复安装时会互相打架）。
+     */
     restore: () => {
+      if (restored) return;
+      restored = true;
       suspended = false;
-      commandService.executeCommand = originalExecute;
-      commandService.syncExecuteCommand = originalSyncExecute;
+      if (ownExecute) Object.defineProperty(commandService, 'executeCommand', ownExecute);
+      else delete (commandService as unknown as Record<string, unknown>).executeCommand;
+      if (ownSyncExecute) Object.defineProperty(commandService, 'syncExecuteCommand', ownSyncExecute);
+      else delete (commandService as unknown as Record<string, unknown>).syncExecuteCommand;
+      installedGuards.delete(commandService);
     },
   };
+  installedGuards.set(commandService, guard);
+  return guard;
 }

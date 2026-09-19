@@ -42,17 +42,24 @@ export interface ImportSummary {
   cells?: number;
 }
 
-/** 引导：等 __p0 钩子就位 + app:ready 落日志 */
+/**
+ * 引导：等 __p0 钩子就位 + app:ready 落日志。
+ *
+ * 超时给到 60 秒（原来 30 秒）：本机 6 并发跑主项目时，开发服务器要为**每个 worker** 第一次
+ * 变换整张模块图（Univer 那一坨 5MB 的 vendor），偶发会超过 30 秒，于是出现"启动超时"的**假红**
+ * （实测 `blank-page-guard` ⑤ / `context-menu` ③ / `coordinates` ⓪ 三条单跑都绿、并跑偶红）。
+ * 用例本身的预算本来就是 60–180 秒，这里放宽只是不再让"机器忙"表现成"功能坏了"。
+ */
 export async function waitForBoot(page: Page): Promise<void> {
   await page.goto('/');
-  await page.waitForFunction(() => Boolean((window as never as { __p0?: unknown }).__p0), null, { timeout: 30_000 });
+  await page.waitForFunction(() => Boolean((window as never as { __p0?: unknown }).__p0), null, { timeout: 60_000 });
   await page.waitForFunction(
     () => {
       const hooks = (window as never as { __p0?: { findLast: (k: string) => unknown } }).__p0;
       return Boolean(hooks?.findLast('app:ready') ?? hooks?.findLast('p0:ready'));
     },
     null,
-    { timeout: 30_000 },
+    { timeout: 60_000 },
   );
 }
 

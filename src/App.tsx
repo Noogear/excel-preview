@@ -92,7 +92,14 @@ import {
   type SessionTab,
   type SessionTabEdit,
 } from './persistence/session';
-import { clearWorkbookDirty, dirtyCellCount, getDirtyCells, resetAllDirty } from './univer/dirty-tracker';
+import {
+  clearWorkbookDirty,
+  dirtyCellCount,
+  getDirtyCells,
+  pauseDirtyTracking,
+  resetAllDirty,
+  resumeDirtyTracking,
+} from './univer/dirty-tracker';
 import { installContentOnlyLock, probePermissionApi, type ContentOnlyLock } from './univer/lock';
 import { installReadOnlyGuard, type ReadOnlyGuard } from './univer/read-only-guard';
 import { bootUniver, loadWorkbook, type UniverBoot } from './univer/setup';
@@ -531,11 +538,31 @@ export function App() {
   }, []);
 
   // ---------------------------------------------------------------- 小工具
+  /**
+   * 提示条（toast）：3.2 秒后自动消失。
+   *
+   * 定时器句柄要**记下来并在卸载时清掉**（审计提的）：虽然最多同时 3 条、也不抓着大对象，
+   * 但"卸载后还有定时器往回 setState"是不该留的尾巴（HMR 重挂时会对着旧实例调用）。
+   */
+  const toastTimersRef = useRef<Set<number>>(new Set());
   const toast = useCallback((text: string, kind: Toast['kind'] = 'info') => {
     const id = Date.now() + Math.random();
     setToasts((prev) => [...prev.slice(-2), { id, text, kind }]);
-    window.setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== id)), 3200);
+    const timer = window.setTimeout(() => {
+      toastTimersRef.current.delete(timer);
+      setToasts((prev) => prev.filter((t) => t.id !== id));
+    }, 3200);
+    toastTimersRef.current.add(timer);
   }, []);
+
+  // 卸载时清掉所有待触发的提示定时器（与上面成对）
+  useEffect(
+    () => () => {
+      for (const timer of toastTimersRef.current) window.clearTimeout(timer);
+      toastTimersRef.current.clear();
+    },
+    [],
+  );
 
   const getSheet = useCallback((): FWorksheet | null => apiRef.current?.getActiveWorkbook()?.getActiveSheet() ?? null, []);
 
@@ -1180,11 +1207,9 @@ export function App() {
        * 像素 → 单元格（自建命中测试）。
        *
        * 为什么不用 Univer 的 `CellPointerMove`：非选择模式下我们会屏蔽 pointermove（见下面的指针接线），
-       * 那个事件也就不会再派发。这里直接用渲染服务的 `getCellWithCoordByOffset`，坐标要换算成
-       * 相对主画布的位置。
+       * 那个事件也就不会再派发；而渲染服务那个 `getCellWithCoordByOffset` 后来也确认不适用，
+       * 最终走的是下面自建的换算（见 `hitTestCell`）。这里不再留"渲染服务缓存"那个从没用过的 ref。
        */
-      /** 命中测试用到的渲染服务缓存（按 unitId；拖动时高频调用，避免反复 DI 查询） */
-      const hitServiceRef = { current: null as null | { unitId: string; service: { getCellWithCoordByOffset?: (px: number, py: number) => { actualRow?: number; actualColumn?: number } | null } | null } };
       /** 提醒框定位用的 scene/skeleton 缓存：声明在组件级（释放单元时要清），见那里的注释 */
       /** 互换后"补清选区"的 rAF 句柄 */
       const selectionClearRafRef = { current: null as number | null };
@@ -2698,10 +2723,13 @@ export function App() {
       guardRef.current?.suspend();
       // 同 handleFile：重建期间的命令不入账（紧接着的 clearUndoRedoFor 会清账本，但别让幽灵 id 留在认领池里）
       pauseAutoEntriesRef.current = true;
+      // 同 handleFile：重建时应用特性同样不算"用户改动"，暂停脏格记账
+      pauseDirtyTracking();
       try {
         await applyWorkbookFeatures(api, parsed);
       } finally {
         guardRef.current?.resume();
+        resumeDirtyTracking();
         pauseAutoEntriesRef.current = false;
       }
       // 更新导出用的瘦身模型（重建后必须刷新，否则导出的是重建前的旧快照）
@@ -3236,11 +3264,18 @@ export function App() {
          * 任何看得见的东西，正是反馈里"面板加的数据撤不掉"的观感来源）。
          */
         pauseAutoEntriesRef.current = true;
+        /**
+         * 同时**暂停脏格记账**：应用特性（尤其超链接会写进单元格的富文本）也会经过 mutation 包装，
+         * 不暂停就会把"我们自己装载时的写入"记成用户改动 —— 表现是**刚打开的文件立刻显示"未保存"**，
+         * 而且导出时会把本来可以原样保留的 XML 当成"改过的格子"去回写。见 `dirty-tracker.ts`。
+         */
+        pauseDirtyTracking();
         let featureResult: ApplyFeaturesResult;
         try {
           featureResult = await applyWorkbookFeatures(api, parsed);
         } finally {
           guardRef.current?.resume();
+          resumeDirtyTracking();
           pauseAutoEntriesRef.current = false;
         }
         const featureMs = Math.round(performance.now() - t3);

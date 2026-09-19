@@ -15,15 +15,17 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "e2e": "npm run e2e:main && npm run e2e:sensitive",
+    "e2e": "npm run e2e:main && npm run e2e:sensitive && npm run e2e:hot-reload",
     "e2e:main": "playwright test --project=main --workers=6",
     "e2e:fast": "playwright test --project=main --workers=6",
     "e2e:sensitive": "playwright test --project=sensitive --workers=1",
+    "e2e:hot-reload": "playwright test --project=hot-reload --workers=1",
     "e2e:ui": "playwright test --ui",
     "fixtures": "node tools/make-fixtures.mjs",
     "fixtures:legacy": "pwsh -NoProfile -File tools/make-legacy-fixtures.ps1",
     "bench:fixture": "node tools/make-benchmark.mjs",
-    "bench:parse": "node tools/bench-parse.mjs"
+    "bench:parse": "node tools/bench-parse.mjs",
+    "bridge:clean": "pwsh -NoProfile -File tools/clean-orphan-excel.ps1"
   },
   "dependencies": {
     "@univerjs/core": "^0.25.1",

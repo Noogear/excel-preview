@@ -128,11 +128,24 @@ export function installDragProbe(univerAPI: FUniver, container: HTMLElement): Dr
       gesture.maxDistance = Math.max(gesture.maxDistance, Math.hypot(dx, dy));
     };
 
-    const onPointerUp = (ev: PointerEvent) => {
+    /**
+     * 结束这一次手势：**摘监听 + 清定时器 + 清状态**，是唯一的收尾出口。
+     *
+     * 为什么要单独抽出来（审计查出的漏法）：以前只有 `onPointerUp` 会收尾，
+     * 于是"手势进行中恰好 `dispose()`"（卸载/HMR/切页面丢了 pointerup）就会把
+     * pointermove/pointerup/pointercancel **三个 window 监听连同闭包永久留下**，
+     * 长按定时器也不会被清。现在 `onPointerUp` 与 `dispose` 都走它。
+     */
+    const endGesture = (): void => {
       window.clearTimeout(timer);
       window.removeEventListener('pointermove', onPointerMove, true);
       window.removeEventListener('pointerup', onPointerUp, true);
       window.removeEventListener('pointercancel', onPointerUp, true);
+      endActiveGesture = null;
+    };
+
+    const onPointerUp = (ev: PointerEvent) => {
+      endGesture();
       if (!gesture) return;
       const summary = {
         durationMs: Math.round(performance.now() - gesture.downAt),
@@ -156,6 +169,8 @@ export function installDragProbe(univerAPI: FUniver, container: HTMLElement): Dr
     window.addEventListener('pointermove', onPointerMove, true);
     window.addEventListener('pointerup', onPointerUp, true);
     window.addEventListener('pointercancel', onPointerUp, true);
+    // 登记"在途手势的收尾函数"，供 dispose 兜底调用
+    endActiveGesture = endGesture;
   };
 
   container.addEventListener('pointerdown', onPointerDown, true);
@@ -174,6 +189,10 @@ export function installDragProbe(univerAPI: FUniver, container: HTMLElement): Dr
   return {
     dispose: () => {
       disposables.forEach((d) => d.dispose());
+      // 手势进行中也要收干净：否则那三个 window 监听与长按定时器会永久留下（见 endGesture）
+      endActiveGesture?.();
+      endActiveGesture = null;
+      gesture = null;
       container.removeEventListener('pointerdown', onPointerDown, true);
       container.removeEventListener('dragover', onDragOver);
       container.removeEventListener('drop', onDrop);
@@ -183,6 +202,8 @@ export function installDragProbe(univerAPI: FUniver, container: HTMLElement): Dr
 }
 
 let lastGestureSummary: Record<string, unknown> | null = null;
+/** 在途手势的收尾函数（dispose 时兜底调用）；没有在途手势时为 null */
+let endActiveGesture: (() => void) | null = null;
 
 function safeDataTransferTypes(dataTransfer: unknown): string[] {
   try {
