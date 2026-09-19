@@ -27,6 +27,11 @@ const SENSITIVE = [
   '**/tabs-memory.spec.ts',
   '**/static-form.spec.ts',
   '**/date-cells.spec.ts',
+  /**
+   * 剪贴板用例读写的是**真实系统剪贴板**（机器级共享资源）：
+   * 并发跑时别人的复制会盖掉它的哨兵值，测出来的失败不是真失败。
+   */
+  '**/clipboard.spec.ts',
 ];
 
 export default defineConfig({

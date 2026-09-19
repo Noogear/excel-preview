@@ -44,7 +44,7 @@ export interface ReadOnlyGuard {
  *    拦掉它们会让表格无法点选/滚动/输入
  *  - `undo/redo`：撤销重做本身必须可用（它回放的 mutation 会再走一遍本闸门）
  *  - 值与公式：`set-range-values`（打字/公式栏/我们的互换与写回）
- *  - 剪贴板：`paste`/`paste-value`/`copy`/`cut`（粘贴里的样式由 mutation 层剥离）
+ *  - 剪贴板：`univer.command.copy`（真实 id 不在 `sheet.command.*` 下，见下方长注释）；粘贴走 `sheet.command.paste*`
  *  - 内容清理与传播：`clear-selection-content`/`auto-clear-content`/`copy-down`/`copy-right`
  *  - 选择与导航：`move-selection*`/`select-all`/`expand-selection`/`scroll-*`
  *  - 视图：`change-zoom-ratio`
@@ -74,10 +74,29 @@ const ALLOW_PATTERNS: RegExp[] = [
   /** 公式引擎的重算记账（只写计算结果，不碰样式） */
   /^formula\.(mutation|command)/,
   /^sheet\.operation\./,
+  /**
+   * 复制：**真实 id 在 `univer.command.*` 命名空间里**，不是 `sheet.command.*`。
+   *
+   * 实测教训（真实缺陷，e2e 抓到的）：`@univerjs/ui` 里
+   * `CopyCommandName = 'univer.command.copy'`，而 `@univerjs/sheets-ui` 的
+   * `SheetCopyCommand = { id: CopyCommand.id, name: 'sheet.command.copy' }` ——
+   * **name 与 id 不是一回事**，命令注册表认的是 id。
+   *
+   * 之前这里白名单写的是 `sheet.command.(copy|cut)`，那两个 id 在 0.25.1 里
+   * **根本不存在**（派发会报 "command is not registered"），于是这条"放行"是空放行，
+   * 真命令反被"默认拒绝"拦掉 —— 表现就是 **Ctrl+C 完全没反应**（剪贴板纹丝不动、
+   * 也没有任何提示），而右键菜单里我们自己实现的「复制内容」是好的，所以一直没被发现。
+   *
+   * **`cut` 故意不放行**：`univer.command.cut` 本身只做标记，真正清空源发生在粘贴时，
+   * 而那条路径可能落到被本闸门拦掉的 `move-range` / `reorder-range` 上，
+   * 会变成"剪切看着成功、却粘不出来"的半坏状态。产品里的剪切由「剪切到工作区」承担。
+   * （`sheet.command.copy` 只作为将来 id 改名的兼容别名保留，0.25.1 下不存在。）
+   */
+  /^univer\.command\.copy$/,
+  /^sheet\.command\.copy$/,
   /^sheet\.command\.set-range-values$/,
   /^sheet\.command\.paste(-value|-by-short-key)?$/,
   /^sheet\.command\.optional-paste$/,
-  /^sheet\.command\.(copy|cut)$/,
   /^sheet\.command\.clear-selection-content$/,
   /^sheet\.command\.auto-clear-content$/,
   /^sheet\.command\.(copy-down|copy-right)$/,

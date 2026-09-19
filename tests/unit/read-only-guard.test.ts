@@ -17,11 +17,15 @@ describe('放行：不写入文档的操作与纯内容编辑', () => {
     'sheet.command.set-range-values',
     'sheet.mutation.set-range-values',
     // 剪贴板（样式由 mutation 层剥离）
+    //
+    // 注意 `univer.command.copy` 必须在：`sheet.command.copy` 只是 `@univerjs/sheets-ui` 里的 `name`，
+    // 而命令注册表认的是 **id**，真实 id 是 `univer.command.copy`（见 read-only-guard 注释）。
+    // 历史上白名单只写了前者 → 空放行，真命令被默认拒绝 → **Ctrl+C 全无反应**（真实缺陷，e2e 抓到）。
+    'univer.command.copy',
     'sheet.command.paste',
     'sheet.command.paste-value',
     'sheet.command.paste-by-short-key',
     'sheet.command.copy',
-    'sheet.command.cut',
     // 内容清理与传播
     'sheet.command.clear-selection-content',
     'sheet.command.auto-clear-content',
@@ -123,6 +127,11 @@ describe('拒绝：样式 / 结构 / 对象 / 子表', () => {
     // 其它危险动作
     'sheet.command.clear-selection-all',
     'sheet.command.repeat-last-action',
+    // 剪切：**故意不放行**（`univer.command.cut` 只做标记，清空源在粘贴时发生，
+    // 那条路径可能落到被拦的 move/reorder 上 → 会变成"剪切看着成功却粘不出来"。
+    // 产品里的剪切由「剪切到工作区」承担）。
+    'univer.command.cut',
+    'sheet.command.cut',
     // 编辑器内的富文本格式化（"只改文字"不允许加入格式）
     'doc.command.set-bold',
     'doc.command.set-italic',

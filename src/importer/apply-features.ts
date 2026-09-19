@@ -84,10 +84,85 @@ const NOTE_HEIGHT = 72;
 const DEFAULT_DATA_BAR_COLOR = '#638EC6';
 
 /**
- * Blob URL 必须一直被持有：图片服务是"插图之后再按 url 取图"的异步流程，
- * 立刻 `revokeObjectURL` 会让图片变成空白。这里只登记不回收（页面生命周期内有效）。
+ * 插图用的 blob url：**按工作簿登记**，工作簿被释放（关标签 / 冷存）时统一回收。
+ *
+ * 为什么**不能立刻** revoke：图片服务是"插图之后再按 url 取图"的异步流程，
+ * 马上 revoke 会让图片变空白 —— 所以 url 的生命周期要**跟着工作簿走**，而不是跟着这次插入走。
+ *
+ * 为什么**也不能**像以前那样"登记进一个 Set 然后页面生命周期内永不回收"（真实内存泄漏）：
+ * 每个 url 都会把它背后的图片字节一直钉在内存里。打开若干份带图的表再关掉，这些字节
+ * 一个都还不了（更糟的是冷存标签时，工作簿都 dispose 了、图片字节却还留着）。
+ * 释放时机是安全的：`disposeUnit` 之后该簿的图片服务不会再取图；冷存标签切回时会重新走
+ * `applyWorkbookFeatures` 重新插图、重新建 url（见 `App.tsx` 的 `buildTabUnit`）。
  */
-const retainedObjectUrls = new Set<string>();
+const objectUrlsByWorkbook = new Map<string, Set<string>>();
+
+/** 拿不到 unitId 时的兜底桶（仍会被 `releaseAllImageObjectUrls` 回收） */
+const UNKNOWN_WORKBOOK = '__unknown__';
+
+/** 登记一个"要跟着工作簿活着"的 blob url（由 `applyImages` 调用） */
+export function retainImageObjectUrl(workbookId: string, url: string): void {
+  let urls = objectUrlsByWorkbook.get(workbookId);
+  if (!urls) {
+    urls = new Set<string>();
+    objectUrlsByWorkbook.set(workbookId, urls);
+  }
+  urls.add(url);
+}
+
+/** 释放单个 url（插图失败时可以立刻作废，不必等整簿释放） */
+export function releaseImageObjectUrl(workbookId: string, url: string): void {
+  const urls = objectUrlsByWorkbook.get(workbookId);
+  if (!urls) return;
+  if (!urls.delete(url)) return;
+  try {
+    URL.revokeObjectURL(url);
+  } catch {
+    /* 释放失败也不影响其它 url */
+  }
+  if (urls.size === 0) objectUrlsByWorkbook.delete(workbookId);
+}
+
+/**
+ * 释放某个工作簿的全部插图 blob url，返回释放个数。
+ * 关标签、冷存标签（工作簿被 dispose）时调用。
+ */
+export function releaseWorkbookImageObjectUrls(workbookId: string): number {
+  const urls = objectUrlsByWorkbook.get(workbookId);
+  if (!urls) return 0;
+  objectUrlsByWorkbook.delete(workbookId);
+  let released = 0;
+  for (const url of urls) {
+    try {
+      URL.revokeObjectURL(url);
+      released += 1;
+    } catch {
+      /* 单个 url 释放失败不影响其它；它仍会随页面卸载一起消失 */
+    }
+  }
+  return released;
+}
+
+/** 兜底：释放全部（整实例拆卸 / HMR / 测试重置）。返回释放个数。 */
+export function releaseAllImageObjectUrls(): number {
+  let released = 0;
+  for (const workbookId of [...objectUrlsByWorkbook.keys()]) released += releaseWorkbookImageObjectUrls(workbookId);
+  return released;
+}
+
+/** 诊断/测试用：当前还挂着多少个未被回收的插图 blob url */
+export function countRetainedImageObjectUrls(): number {
+  let total = 0;
+  for (const urls of objectUrlsByWorkbook.values()) total += urls.size;
+  return total;
+}
+
+/** 诊断/测试用：按工作簿看分布 */
+export function retainedImageObjectUrlsByWorkbook(): Record<string, number> {
+  const result: Record<string, number> = {};
+  for (const [workbookId, urls] of objectUrlsByWorkbook) result[workbookId] = urls.size;
+  return result;
+}
 
 /**
  * Excel OOXML 的 iconSet 名 → Univer `IIconSetType` 名。
@@ -141,6 +216,18 @@ function skip(ctx: FeatureContext, message: string): void {
 function errorText(error: unknown): string {
   if (error instanceof Error) return error.message;
   return String(error);
+}
+
+/**
+ * 取当前工作表所属工作簿的 unitId（插图 blob url 按它归档）。
+ * 取不到时落到兜底桶：宁可"晚一点释放"，也不能在这里抛异常打断导入。
+ */
+function workbookIdOf(ctx: FeatureContext): string {
+  try {
+    return ctx.fWorksheet.getWorkbook().getUnitId() ?? UNKNOWN_WORKBOOK;
+  } catch {
+    return UNKNOWN_WORKBOOK;
+  }
 }
 
 /** 去掉 OOXML 里的外层双引号（列表字面量、文本比较值都用它包裹） */
@@ -929,6 +1016,8 @@ function applyNotes(ctx: FeatureContext): void {
 
 async function applyImages(ctx: FeatureContext): Promise<void> {
   const images = ctx.sheet.images ?? [];
+  // 这一批图片的 url 全部登记到**所在工作簿**名下，关标签/冷存时整簿回收
+  const workbookId = workbookIdOf(ctx);
 
   for (const [index, image] of images.entries()) {
     const label = `图片#${index + 1}(${image.mediaPath})`;
@@ -947,8 +1036,8 @@ async function applyImages(ctx: FeatureContext): Promise<void> {
       const buffer = new ArrayBuffer(bytes.byteLength);
       new Uint8Array(buffer).set(bytes);
       objectUrl = URL.createObjectURL(new Blob([buffer], { type: mimeFromPath(image.mediaPath) }));
-      // 不 revoke：图片服务在渲染阶段才去取这个 url
-      retainedObjectUrls.add(objectUrl);
+      // 不 revoke：图片服务在渲染阶段才去取这个 url；但要登记到工作簿名下，随簿释放
+      retainImageObjectUrl(workbookId, objectUrl);
 
       const builder = ctx.fWorksheet
         .newOverGridImage()
@@ -966,10 +1055,8 @@ async function applyImages(ctx: FeatureContext): Promise<void> {
       ctx.fWorksheet.insertImages([sheetImage]);
       ctx.counts.images += 1;
     } catch (error) {
-      if (objectUrl) {
-        URL.revokeObjectURL(objectUrl);
-        retainedObjectUrls.delete(objectUrl);
-      }
+      // 插入失败 → **只**作废这一张图的 url（不能整簿释放，那会把同一簿里已插好的图弄成空白）
+      if (objectUrl) releaseImageObjectUrl(workbookId, objectUrl);
       fail(ctx, `${label} 插入失败：${errorText(error)}`);
     }
   }

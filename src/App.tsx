@@ -56,7 +56,14 @@ import {
   type SwapFlashOverlay,
 } from './interaction/swap-flash';
 import { toUniverWorkbook, type ImportOutcome } from './importer/to-univer';
-import { applyWorkbookFeatures, type ApplyFeaturesResult } from './importer/apply-features';
+import {
+  applyWorkbookFeatures,
+  countRetainedImageObjectUrls,
+  releaseAllImageObjectUrls,
+  releaseWorkbookImageObjectUrls,
+  retainedImageObjectUrlsByWorkbook,
+  type ApplyFeaturesResult,
+} from './importer/apply-features';
 import { exportXlsx, type CellEdit, type ExportSource, type SheetEdits } from './exporter/export-xlsx';
 import { slimForExport } from './exporter/slim-source';
 import { buildDelimited, encodeDelimited } from './exporter/csv-export';
@@ -85,7 +92,7 @@ import {
   type SessionTab,
   type SessionTabEdit,
 } from './persistence/session';
-import { clearWorkbookDirty, dirtyCellCount, getDirtyCells } from './univer/dirty-tracker';
+import { clearWorkbookDirty, dirtyCellCount, getDirtyCells, resetAllDirty } from './univer/dirty-tracker';
 import { installContentOnlyLock, probePermissionApi, type ContentOnlyLock } from './univer/lock';
 import { installReadOnlyGuard, type ReadOnlyGuard } from './univer/read-only-guard';
 import { bootUniver, loadWorkbook, type UniverBoot } from './univer/setup';
@@ -118,6 +125,7 @@ import { EMPTY_FILTER, type WorkspaceFilter } from './workspace/filter';
 import { WorkspacePanel } from './workspace/WorkspacePanel';
 import { Toolbar, type TabInfo } from './shell/Toolbar';
 import { HistoryPanel } from './shell/HistoryPanel';
+import { writeClipboardText } from './shell/clipboard-write';
 import { ContextMenu } from './shell/ContextMenu';
 import type { MenuItemSpec } from './shell/context-menu-model';
 import { appendEntry, planJump, type HistoryEntry, type HistoryKind } from './shell/history-model';
@@ -260,6 +268,18 @@ export function App() {
   const apiRef = useRef<FUniver | null>(null);
   const lockRef = useRef<ContentOnlyLock | null>(null);
   const guardRef = useRef<ReadOnlyGuard | null>(null);
+  /**
+   * 提醒框定位用的 `scene` / `skeleton` 缓存（按 unitId）。
+   *
+   * 为什么放在**组件级**（原来是引导 effect 里的局部对象）：释放工作簿的路径
+   * （`coldStoreTab` / `closeTab` / 拆示例簿）在 effect 外面，访问不到局部对象，
+   * 于是 `disposeUnit` 之后缓存仍指着**已释放的渲染单元**（scene + skeleton 及其可达的
+   * 行列几何/工作表数据），要等下一次命中测试才被换掉 —— 大表这一份对象不小。
+   * 提升到这里，释放单元时就能顺手清掉（见 `releaseUnitBookkeeping`）。
+   */
+  const renderCacheRef = useRef<null | { unitId: string; scene: unknown; skeleton: unknown }>(null);
+  /** 分隔条拖动进行中的"摘监听"函数（卸载兜底用，见 startSidebarResize） */
+  const sidebarResizeCleanupRef = useRef<(() => void) | null>(null);
   const instanceServiceRef = useRef<IUniverInstanceService | null>(null);
   const controllerRef = useRef<DragController | null>(null);
   const pendingWorkspaceDragRef = useRef<{ snapshot: RangeSnapshot; x: number; y: number; started: boolean } | null>(null);
@@ -638,6 +658,23 @@ export function App() {
   >(() => {});
 // ---------------------------------------------------------------- 落点处理
   /**
+   * 把 `snapshotStoreRef`（id → 快照）与**当前的 items 列表**对齐。
+   *
+   * 为什么必须收口（审计查出的真实泄漏 + 一处功能缺陷）：
+   *  - **泄漏**：以前只有 `commitWorkspace` 里按 `before` 删，而"加入工作区 → Ctrl+Z"撤销之后，
+   *    那些条目已经不在 items 里、也就再不会出现在任何一次 `before` 中 → 它们的快照**永远删不掉**。
+   *    快照 id 是 `snap-${Date.now()}-${seq}`（永不复用），所以每来回一次就永久多留一条。
+   *  - **功能缺陷**：反向也不一致 —— 撤销"移除条目"时 items 回来了、store 里却没有，
+   *    读 store 的路径（拖拽写回、粘贴）会取到 `undefined`，表现成"工作区条目不存在"。
+   *  现在统一按"当前列表"对齐（多删少补），三条写 items 的路径共用它。
+   */
+  const syncSnapshotStore = useCallback((next: RangeSnapshot[]) => {
+    const alive = new Set(next.map((item) => item.id));
+    for (const id of [...snapshotStoreRef.current.keys()]) if (!alive.has(id)) snapshotStoreRef.current.delete(id);
+    for (const item of next) if (!snapshotStoreRef.current.has(item.id)) snapshotStoreRef.current.set(item.id, item);
+  }, []);
+
+  /**
    * 工作区状态的**唯一提交入口**（所有增删改都走它）。
    *
    * 为什么必须收口：用户反馈"无法撤回对工作区的操作（撤回时工作区未改变，或工作区的操作未被记录）"。
@@ -654,17 +691,15 @@ export function App() {
       if (after === before) return;
       itemsStateRef.current = after;
       setItems(after);
-      // 同步快照表：删掉的清掉，新增的登记（按 id 增删，避免整表重建）
-      const afterIds = new Set(after.map((item) => item.id));
-      for (const item of before) if (!afterIds.has(item.id)) snapshotStoreRef.current.delete(item.id);
-      for (const item of after) if (!snapshotStoreRef.current.has(item.id)) snapshotStoreRef.current.set(item.id, item);
+      // 同步快照表（按 id 增删，避免整表重建）；撤销/重做路径也走同一个函数，见 syncSnapshotStore
+      syncSnapshotStore(after);
       // 记历史（带快照，撤销/重做靠它回放）
       const entryId = `ws-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
       workspaceSnapshotsRef.current.set(entryId, { before, after });
       pushHistoryRef.current(label, kind, 'workspace', entryId);
       log('workspace:commit', { label, before: before.length, after: after.length });
     },
-    [],
+    [syncSnapshotStore],
   );
   commitWorkspaceRef.current = commitWorkspace;
 
@@ -1150,8 +1185,7 @@ export function App() {
        */
       /** 命中测试用到的渲染服务缓存（按 unitId；拖动时高频调用，避免反复 DI 查询） */
       const hitServiceRef = { current: null as null | { unitId: string; service: { getCellWithCoordByOffset?: (px: number, py: number) => { actualRow?: number; actualColumn?: number } | null } | null } };
-      /** 提醒框定位用的 scene/skeleton 缓存（同样按 unitId） */
-      const renderCacheRef = { current: null as null | { unitId: string; scene: unknown; skeleton: unknown } };
+      /** 提醒框定位用的 scene/skeleton 缓存：声明在组件级（释放单元时要清），见那里的注释 */
       /** 互换后"补清选区"的 rAF 句柄 */
       const selectionClearRafRef = { current: null as number | null };
       /** 互换后"补清选区"的兜底定时器句柄 */
@@ -1530,6 +1564,9 @@ export function App() {
         flashOverlayRef.current = null;
         targetHighlightRef.current?.dispose();
         targetHighlightRef.current = null;
+        // 滚动条上的"抓取高亮"节点是直接挂到 document.body 的：卸载时若指针正悬在条带上
+        // （hover 态不会自己消失），它会变成一个永久游离在 body 上的节点 → 这里兜底摘掉
+        hideScrollbarGrab();
         if (selectionClearRafRef.current !== null) window.cancelAnimationFrame(selectionClearRafRef.current);
         selectionClearRafRef.current = null;
         if (selectionClearTimerRef.current !== null) window.clearTimeout(selectionClearTimerRef.current);
@@ -2389,6 +2426,8 @@ export function App() {
             const dropped = state.workspace.length - restored.length;
             if (dropped > 0) log('workspace:skip-on-restore', { dropped, kept: restored.length });
             setItems(restored);
+            // 恢复出来的条目也必须进快照表，否则拖拽写回/粘贴按 id 取不到（"条目不存在"）
+            syncSnapshotStore(restored);
           }
 
           // 恢复现场：**只实体化当前要看的那个标签**，其余标签先"冷"着（只记字节与编辑）。
@@ -2469,6 +2508,21 @@ export function App() {
       cleanups.forEach((fn) => fn());
       lockRef.current?.restore();
       guardRef.current?.restore();
+      /**
+       * ③ 把"按 unitId 记账"的全局账本也清掉，并**摘掉挂在 window 上的测试钩子**。
+       *
+       * 为什么必须做：
+       *  - 整个 Univer 实例都要拆了 → 它名下所有插图的 blob url 一并回收（HMR/卸载都会走这里）；
+       *  - `dirtyByWorkbook` 是模块级的（跨实例存活），不清就会跟着下一个 Univer 实例留下旧账
+       *    （示例/占位单元用固定 id `p0-workbook`，最容易被继承）；
+       *  - `window.__p0` / `window.__app` 上挂的钩子闭包持有 `tabsDataRef`（**每个标签的整份原始字节**）
+       *    与工作区快照表。它以前从不移除，所以在"真的卸载"（非 HMR）路径上，这些 MB 级对象
+       *    即使在 boot.dispose() 之后仍然可达、回收不掉。
+       */
+      releaseAllImageObjectUrls();
+      resetAllDirty();
+      delete (window as unknown as Record<string, unknown>).__p0;
+      delete (window as unknown as Record<string, unknown>).__app;
       boot?.dispose();
     };
     // 依赖刻意留空：引导只做一次；后续状态变化通过 ref 读取，避免重建 Univer 实例
@@ -2509,6 +2563,41 @@ export function App() {
   }, []);
 
   /**
+   * 释放一个工作簿单元时的**统一记账清理**（关标签 / 冷存 / 拆示例簿都走它）。
+   *
+   * 为什么要收口（一次审计查出来的真实泄漏 + 一处正确性副作用）：
+   *  `disposeUnit` 只放掉 Univer 自己的模型，而我们还有几本**按 unitId 记账**的东西：
+   *  Univer 的撤销栈（不随 dispose 清）、插图 blob url（钉着图片字节）、
+   *  渲染单元缓存（scene/skeleton）、编辑桶、脏格账本、填充柄日志去重表。
+   *  以前 `closeTab` 手写了 4 项、`coldStoreTab` 一项都没写、`disposeSampleWorkbook` 同样没有 ——
+   *  于是：① 冷存期间这些账还占着内存，冷存省下来的东西被抵消一部分；
+   *  ② **示例簿/占位簿复用同一个 id（`p0-workbook`）**，它释放后脏格账本跨实例存活，
+   *  新实例会继承上一次的脏格计数（`dirtyCellCount` 既决定标签上的红点，也是外科式导出的依据）。
+   *  收口之后，"以后再加一项清理"只要改这一处，不会再漏掉某条释放路径。
+   *
+   * @param keepTabState 冷存必须传 `true`：标签还要切回来重建，编辑桶与脏格账本是重建与导出的依据。
+   * @returns 顺带归还的插图 blob url 个数（日志用）
+   */
+  const releaseUnitBookkeeping = useCallback((id: string, options: { keepTabState?: boolean } = {}): number => {
+    // ① Univer 的撤销栈：不随 disposeUnit 清理（见 clearUndoRedoFor 的说明）
+    try {
+      undoRedoServiceRef.current?.clearUndoRedo?.(id);
+    } catch {
+      /* 已经没了就算了 */
+    }
+    // ② 插图 blob url：每个都钉着一份图片字节
+    const urlsReleased = releaseWorkbookImageObjectUrls(id);
+    // ③ 按 unitId 缓存的渲染单元（大表这份对象不小）与填充柄日志去重表
+    if (renderCacheRef.current?.unitId === id) renderCacheRef.current = null;
+    fillHandleLoggedRef.current.delete(id);
+    if (!options.keepTabState) {
+      editsByTabRef.current.delete(id);
+      clearWorkbookDirty(id);
+    }
+    return urlsReleased;
+  }, []);
+
+  /**
    * 冷存一个标签：**先把编辑快照下来**（否则随模型一起消失），再 dispose 掉 Univer 工作簿。
    * 字节、文件名、编辑桶都留着，切回时重建。
    */
@@ -2526,9 +2615,20 @@ export function App() {
         const captured = snapshotEditsForRef.current(id);
         api.disposeUnit(id);
         tabRuntimeRef.current = markTabCold(tabRuntimeRef.current, id);
+        /**
+         * 工作簿被释放了，它名下那几本账也要一起还：
+         *  - **插图 blob url**：否则冷存只省下模型，图片字节还钉在内存里；
+         *  - **Univer 撤销栈**：不随 dispose 清，冷存期间一直占着每次编辑的 mutation 快照
+         *    （重建时本来就会清，所以提前清不损失任何行为）；
+         *  - **渲染单元缓存**：否则仍指着已释放的 scene/skeleton。
+         * 安全前提：切回重建会重走 `applyWorkbookFeatures` 重新插图（`buildTabUnit`）。
+         * 注意**不能**用 `clearUndoRedoFor`：那会连全局历史账本一起重置（账本属于当前活动标签）。
+         */
+        const urlsReleased = releaseUnitBookkeeping(id, { keepTabState: true });
         log('tab:cold-store', {
           id,
           captured,
+          urlsReleased,
           resident: tabRuntimeRef.current.filter((tab) => tab.built).length,
         });
         return true;
@@ -2537,7 +2637,7 @@ export function App() {
         return false;
       }
     },
-    [],
+    [releaseUnitBookkeeping],
   );
 
   /** 常驻窗口：实体化的标签超过上限时，把最久未用的非活动标签冷存掉（内存从 O(N) 变 O(K)） */
@@ -2561,11 +2661,17 @@ export function App() {
       // 存在就释放，不存在就算了。
       if (!api.getWorkbook(SAMPLE_WORKBOOK_ID)) return;
       api.disposeUnit(SAMPLE_WORKBOOK_ID);
+      /**
+       * 示例簿/占位簿**复用同一个固定 id**（`p0-workbook`），所以这里必须把它的记账也清掉：
+       * 否则它被释放后脏格账本仍挂在这个 id 上，而占位单元用同一个 id 重建 →
+       * 新实例直接继承上一次的脏格计数（标签上的红点、以及外科式导出的"要回写哪些格子"都会错）。
+       */
+      releaseUnitBookkeeping(SAMPLE_WORKBOOK_ID);
       log('tab:sample-disposed', { id: SAMPLE_WORKBOOK_ID });
     } catch (error) {
       log('tab:sample-dispose-error', { message: String(error) });
     }
-  }, []);
+  }, [releaseUnitBookkeeping]);
 
   /**
    * 重建一个冷标签（切回时按需触发）：走与导入完全相同的管线
@@ -2688,16 +2794,9 @@ export function App() {
       } catch (error) {
         log('tab:dispose-error', { message: String(error) });
       }
-      // 三处清理，缺一个就是泄漏（见 M4-多标签内存分析.md 的"顺手就该做的清理"）：
-      // ① 编辑桶 ② 实体化记账 ③ Univer 的撤销栈（它不会随 dispose 自动清）
-      editsByTabRef.current.delete(id);
+      // 关标签的清理全部走统一入口（缺一项就是泄漏，明细见 releaseUnitBookkeeping）
+      releaseUnitBookkeeping(id);
       tabRuntimeRef.current = dropTab(tabRuntimeRef.current, id);
-      try {
-        undoRedoServiceRef.current?.clearUndoRedo?.(id);
-      } catch {
-        /* 已经没了就算了 */
-      }
-      clearWorkbookDirty(id);
       const next = list.filter((item) => item.id !== id);
       tabsDataRef.current = next;
       log('tab:close', { id, remaining: next.length });
@@ -2718,7 +2817,7 @@ export function App() {
       }
       syncTabs();
     },
-    [activateTab, syncTabs],
+    [activateTab, releaseUnitBookkeeping, syncTabs],
   );
 
   // ---------------------------------------------------------------- 会话持久化
@@ -3552,6 +3651,7 @@ export function App() {
       if (!snap) return false;
       itemsStateRef.current = snap.before;
       setItems(snap.before);
+      syncSnapshotStore(snap.before); // 撤销"移除条目"时要把快照补回来（否则后续取不到 → "条目不存在"）
       historyIndexRef.current = index - 1;
       setHistoryIndex(index - 1);
       log('history:undo-workspace', { label: entry.label, items: snap.before.length });
@@ -3566,7 +3666,7 @@ export function App() {
       log('history:undo-sheet', { label: entry?.label ?? null });
     }
     return Boolean(ok);
-  }, []);
+  }, [syncSnapshotStore]);
 
   /** 重做一步（与 stepBack 对称） */
   const stepForward = useCallback(async (): Promise<boolean> => {
@@ -3579,6 +3679,7 @@ export function App() {
       if (!snap) return false;
       itemsStateRef.current = snap.after;
       setItems(snap.after);
+      syncSnapshotStore(snap.after); // 与撤销对称：重做后 store 必须与 items 一致
       historyIndexRef.current = index + 1;
       setHistoryIndex(index + 1);
       log('history:redo-workspace', { label: entry.label, items: snap.after.length });
@@ -3593,7 +3694,7 @@ export function App() {
       log('history:redo-sheet', { label: entry?.label ?? null });
     }
     return Boolean(ok);
-  }, []);
+  }, [syncSnapshotStore]);
 
   /**
    * 全局撤销/重做快捷键的**处理函数**。
@@ -3836,7 +3937,16 @@ export function App() {
     [pasteClipboardAt, selectionText],
   );
 
-  /** 拖分隔条改工作区宽度（同时也是"表格区域宽度"）：往左拖变宽 */
+  /**
+   * 拖分隔条改工作区宽度（同时也是"表格区域宽度"）：往左拖变宽。
+   *
+   * 两句额外的话（审计查出来的两处"能漏 listener"的口子）：
+   *  - 必须也监听 `pointercancel`：触控/手写笔手势被浏览器取消、或指针在别处被吞掉时
+   *    不会再有 `pointerup`，只监听 pointerup 的话这两个监听会赖在 window 上，
+   *    期间每次 pointermove 都会 setState 重渲染（表现为"拖完还一直卡"）。
+   *  - 卸载时（HMR/Fast Refresh）要把**进行中**的这两个监听摘掉：它们不在任何 effect 里，
+   *    闭包还抓着 `updateSettings`，否则会一直引用旧实例的 setState。
+   */
   const startSidebarResize = useCallback(
     (event: React.PointerEvent<HTMLDivElement>) => {
       event.preventDefault();
@@ -3845,16 +3955,26 @@ export function App() {
       const move = (e: PointerEvent): void => {
         updateSettings({ sidebarWidth: startWidth - (e.clientX - startX) });
       };
-      const up = (): void => {
+      const end = (): void => {
         window.removeEventListener('pointermove', move, true);
-        window.removeEventListener('pointerup', up, true);
+        window.removeEventListener('pointerup', end, true);
+        window.removeEventListener('pointercancel', end, true);
+        sidebarResizeCleanupRef.current = null;
+      };
+      const up = (): void => {
+        end();
         log('ui:sidebar-resize', { width: settingsRef.current.sidebarWidth });
       };
+      sidebarResizeCleanupRef.current = end;
       window.addEventListener('pointermove', move, true);
       window.addEventListener('pointerup', up, true);
+      window.addEventListener('pointercancel', up, true);
     },
     [updateSettings],
   );
+
+  // 卸载时兜底摘掉"拖动中"的监听（与上面成对；见 startSidebarResize 的说明）
+  useEffect(() => () => sidebarResizeCleanupRef.current?.(), []);
 
   /** Esc 取消"清空"的二次确认（确认条是模态意图，键盘也要能退出来） */
   useEffect(() => {
@@ -4102,10 +4222,13 @@ export function App() {
         separatorBefore: true,
       },
       {
+        // 单块走 Univer 原生复制：同时写 TSV 与带格式的 HTML（字体/底色/边框/合并/列宽都会跟过去）；
+        // 多块只认纯文本（原生复制只取"最后一个选区"，会丢块），所以标签里如实分开写。
         id: 'copy',
         label: multi
-          ? `复制内容（${blocks} 块 / ${totalCells(normalizeRanges(snapshot.a1List))} 格）`
-          : `复制内容（${snapshot.rows}×${snapshot.cols}）`,
+          ? `复制内容（${blocks} 块 / ${totalCells(normalizeRanges(snapshot.a1List))} 格，纯文本）`
+          : `复制内容（${snapshot.rows}×${snapshot.cols}，含格式）`,
+        shortcut: multi ? undefined : 'Ctrl+C',
       },
       {
         // 工作区条目「复制/剪切」后，在表格里右键即可粘贴（只写内容、保留目标格式）
@@ -4199,18 +4322,47 @@ export function App() {
         return;
       }
       if (id === 'copy') {
-        /**
-         * 复制到系统剪贴板：多块之间**空一行**分隔（与 Excel 多区域复制的习惯一致），
-         * 这样粘到别处仍能看出"这是几块"。
-         */
         const list = snapshot.a1List.length > 0 ? snapshot.a1List : [snapshot.a1];
-        const text = list
-          .map((ref) => sheet.getRange(ref).getDisplayValues().map((row) => row.join('\t')).join('\n'))
-          .join('\n\n');
-        void navigator.clipboard?.writeText(text).then(
-          () => toast(list.length > 1 ? `已复制 ${list.length} 块到剪贴板` : '已复制到剪贴板'),
-          () => toast('复制失败：浏览器未授权剪贴板', 'warn'),
-        );
+        /**
+         * 单块：交给 **Univer 原生复制**（`univer.command.copy`）。
+         *
+         * 为什么换成它（而不是继续自己拼 TSV）：原生复制会同时写两种口味——
+         *  - `text/plain`：TSV（与原来的效果一致，仍是**显示值**）
+         *  - `text/html`：`<table>` + 内联样式，实测带出字体/字号/加粗/字色/底色/四边框/
+         *    对齐/合并(rowspan,colspan)/列宽(`<colgroup>`)/行高，还能被 Excel 认出
+         *    （外面那层 `<google-sheets-html-origin>` 就是给 Excel / 在线表格看的）
+         *
+         * 另外它在**没有 Clipboard API** 的环境（`http://局域网IP`）会自动降级到
+         * `execCommand('copy')`，比我们原来的 `navigator.clipboard?.writeText()` 更稳
+         * （后者在那种环境是**静默失败**：不写剪贴板、也不提示）。
+         *
+         * 失败时（命令被拦/无选区）退回纯文本路径，不让用户"点了没反应"。
+         */
+        if (list.length === 1) {
+          const commandService = sheet.getInject().get(ICommandService);
+          void commandService.executeCommand('univer.command.copy').then(
+            (ok) => {
+              log('menu:copy', { a1: list[0], blocks: 1, flavor: 'text/plain+text/html', ok: Boolean(ok) });
+              if (ok) {
+                toast('已复制到剪贴板（含格式，可直接粘到 Excel / WPS）');
+                return;
+              }
+              void copyPlainTextToClipboard(sheet, list, toast);
+            },
+            (error: unknown) => {
+              log('menu:copy-error', { message: String(error) });
+              void copyPlainTextToClipboard(sheet, list, toast);
+            },
+          );
+          return;
+        }
+        /**
+         * 多块：原生复制只认"最后一个选区"（源码里是 `getCurrentLastSelection()`），
+         * 会把其它块丢掉，所以多块仍走纯文本：块与块之间**空一行**分隔
+         * （与 Excel 多区域复制的习惯一致，这样粘到别处仍能看出"这是几块"）。
+         * 代价是多块不带格式 —— 菜单标签里已如实写明"纯文本"。
+         */
+        void copyPlainTextToClipboard(sheet, list, toast);
         return;
       }
       if (id === 'clear') {
@@ -4658,6 +4810,30 @@ export function App() {
   );
 }
 
+/**
+ * 把若干区域以**纯文本 TSV** 写进系统剪贴板（多块之间空一行分隔）。
+ *
+ * 两条路径都走它：① 多块选区（原生复制只认最后一个选区，会丢块）；② 单块时原生复制失败后的兜底。
+ * 抽出来的另一个原因：**成功/失败必须如实告诉用户**——以前这里用
+ * `navigator.clipboard?.writeText()`，在 http 局域网下整条链短路，既不写也不提示（静默失败）。
+ */
+async function copyPlainTextToClipboard(
+  sheet: FWorksheet,
+  list: string[],
+  toast: (text: string, kind?: 'info' | 'warn') => void,
+): Promise<void> {
+  const text = list
+    .map((ref) => sheet.getRange(ref).getDisplayValues().map((row) => row.join('\t')).join('\n'))
+    .join('\n\n');
+  const ok = await writeClipboardText(text);
+  log('menu:copy', { a1: list.join(' '), blocks: list.length, flavor: 'text/plain', ok });
+  if (!ok) {
+    toast('复制失败：浏览器/系统拒绝了剪贴板写入（可用 HTTPS 或 localhost 打开后重试）', 'warn');
+    return;
+  }
+  toast(list.length > 1 ? `已复制 ${list.length} 块到剪贴板（纯文本，不含格式）` : '已复制到剪贴板（纯文本，不含格式）');
+}
+
 function formatDetail(detail: unknown): string {
   if (detail === undefined) return '';
   try {
@@ -4816,6 +4992,16 @@ function installTestHooks(deps: TestHooksDeps): void {
     },
     getDirtySummary: () =>
       deps.tabsRef.current.map((tab) => ({ id: tab.id, dirtyCells: dirtyCellCount(tab.id) })),
+    /**
+     * 插图 blob url 的**未回收计数**（内存泄漏回归用）。
+     *
+     * 口径：这些 url 各自钉着一张图片的字节。关标签/冷存标签/整实例拆卸都必须把它们还回去，
+     * 所以这里能读到 0 才说明"没漏"。以前它们是"登记进一个 Set 然后一辈子不回收"（真实泄漏）。
+     */
+    retainedImageObjectUrls: () => ({
+      total: countRetainedImageObjectUrls(),
+      byWorkbook: retainedImageObjectUrlsByWorkbook(),
+    }),
     /** 直接派发任意命令（用于验证"破坏性命令全被拦下"）；返回命令结果 */
     runCommand: (id: string, params?: unknown) => {
       const sheet = getSheet();

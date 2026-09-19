@@ -95,6 +95,8 @@ export function bootUniver(containerId: string): UniverBoot {
   });
 
   disableForceStringAlert(univer);
+  // 记下"这个实例"的配置服务引用（dispose 时按身份摘掉模块级引用，见下面的 dispose）
+  const bootedConfigService = configServiceRef;
 
   // 启动打点：配合入口的 `app:bundle-loaded` / `app:chunk-loaded` / `app:mounted`
   // 就能量出"骨架 → 应用 → 表格可用"三段耗时（e2e 的启动预算断言读这些 mark）
@@ -104,7 +106,16 @@ export function bootUniver(containerId: string): UniverBoot {
   return {
     univerAPI,
     univer,
-    dispose: () => univer.dispose(),
+    dispose: () => {
+      /**
+       * 摘掉模块级引用再拆实例：`configServiceRef` 是模块级的，而配置服务属于**这一个** Univer 实例。
+       * 不清的话，卸载/HMR 之后模块仍强引用那个已 dispose 的 `IConfigService`
+       * （连带它的配置 Map 与 `_configChanged$` Subject 及其订阅者闭包），要等下一次 `bootUniver` 才被覆盖。
+       * 按身份比对，避免把"下一个实例刚写进去的引用"误清掉。
+       */
+      if (configServiceRef === bootedConfigService) configServiceRef = null;
+      univer.dispose();
+    },
   };
 }
 
