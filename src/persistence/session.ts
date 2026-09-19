@@ -1,17 +1,7 @@
 /**
- * 会话持久化（Session Persistence）：把"多标签 / 编辑 / 工作区 / 交互模式"整份存进
- * **浏览器本地 IndexedDB**，误关闭页面后重新打开能恢复现场。纯前端，没有任何服务端。
- *
- * 设计约束与取舍：
- *  - **零新依赖**：手写极简 IndexedDB 封装（open/upgrade + 一个 object store + 一个 key）。
- *  - **不存 ParsedWorkbook**：解析结果又大又能从原始字节重建，所以只存原始 xlsx 字节；
- *    恢复时走"重新解析 originalBytes"或"Univer 快照"两条路。
- *  - **不存样式**：本产品不允许改样式，edits 只记录"内容（值 / 公式）"。
- *  - **Uint8Array 直接存**：IndexedDB 走结构化克隆，转 base64 会白白膨胀 33%。
- *  - **持久化失败绝不打断编辑**：所有 IndexedDB 异常一律吞掉（只 console.warn），
- *    load() 永远返回 `SessionState | null`，绝不抛。
- *  - **非浏览器环境（node 单测 / SSR）**：save/clear 静默成功、load 返回 null、
- *    estimateBytes 返回 0，因此本模块可以在 node 环境的 Vitest 里直接跑。
+ * 会话持久化：把多标签 / 编辑 / 工作区整份存进浏览器本地 IndexedDB，纯前端零服务端。
+ * 只存原始 xlsx 字节而非 ParsedWorkbook（解析结果大、可重建）；edits 只记内容（值/公式）不记样式。
+ * IndexedDB 异常一律吞掉（只 warn），load() 永不抛——持久化失败绝不能打断编辑。
  */
 
 import type { InteractionMode } from '../interaction/click-swap';
@@ -21,18 +11,14 @@ import type { RangeSnapshot } from '../workspace/types';
 /* 公开契约                                                                    */
 /* ========================================================================== */
 
-/**
- * 交互模式（`'drag' | 'click-swap'`）**复用 interaction 层的定义**，不在这里另起一套。
- * 用 `import type` + `export type` 转出去：编译后完全消失，所以本模块运行时零依赖
- * （e2e 里可以单独把它 import 进浏览器跑）。
- */
+/** 复用 interaction 层的类型定义，不另起一套；`import type` + `export type` 编译后消失，运行时零依赖。 */
 export type { InteractionMode };
 
 export interface SessionTabEdit {
   sheetId: string;
   row: number;
   col: number;
-  /** 只存"内容"：值与公式（样式一律不存，因为本产品不允许改样式） */
+  /** 只存内容：值与公式。样式一律不存，因为本产品不允许改样式。 */
   value: string | number | boolean | null;
   formula: string | null;
 }
@@ -40,42 +26,30 @@ export interface SessionTabEdit {
 export interface SessionTab {
   id: string;
   fileName: string;
-  /** 原始 xlsx 字节（导出时做外科式修补要用；恢复时也要靠它重建 ParsedWorkbook） */
+  /** 原始 xlsx 字节：导出做外科式修补要用，恢复时也要靠它重建 ParsedWorkbook */
   originalBytes: Uint8Array;
-  /** Univer 工作簿快照（univerAPI.getActiveWorkbook() 拿不到时允许为 null，恢复时会走"重新导入+回放编辑"路径） */
+  /** Univer 快照；取不到时为 null，恢复时改走"重新导入 + 回放编辑" */
   snapshot: unknown | null;
-  /** 该标签页内被改过的单元格（按顺序回放即可还原编辑） */
   edits: SessionTabEdit[];
 }
 
-/**
- * 工作区/交互的**用户设置**（都要持久化，重开浏览器后保持）。
- *
- * 全部给默认值：旧会话里没有这个字段，缺失或字段非法时按默认值补齐（不让整体迁移失败）。
- */
 export interface SessionSettings {
-  /** 拖到工作区后是否**保留**表格里的内容（false = 剪切语义） */
+  /** 拖到工作区后是否**保留**表格内容（false = 剪切语义）；以及写回表格后是否把该条目从工作区移除 */
   keepSourceOnDrop: boolean;
-  /** 把条目拖/写回表格后，是否把该条目从工作区移除 */
   removeItemAfterPaste: boolean;
-  /**
-   * 工作区格子的最小宽度（px）：面板越宽，每行自动放下的格子越多。
-   * 默认 128 → 默认宽度（288px）下正好每行 2 列。
-   */
+  /** 工作区格子最小宽度（px）：默认 128 → 默认面板宽 288px 下正好每行 2 列 */
   tileMinWidth: number;
-  /** 工作区宽度（px） */
   sidebarWidth: number;
 }
 
 export const DEFAULT_SETTINGS: SessionSettings = {
   keepSourceOnDrop: true,
   removeItemAfterPaste: false,
-  // 128px：默认面板宽度（288px）下正好每行 2 列；拉宽后自动变成 3、4 列
   tileMinWidth: 128,
   sidebarWidth: 288,
 };
 
-/** 工作区格子最小宽度的范围（px）。它是"每行放几格"的唯一旋钮：面板越宽、这个值越小，每行放下的越多。 */
+/** 工作区格子最小宽度范围（px）。它是"每行放几格"的唯一旋钮：面板越宽、这个值越小，每行越多。 */
 export const TILE_MIN_WIDTH_RANGE = { min: 80, max: 220 } as const;
 export const SIDEBAR_WIDTH_RANGE = { min: 200, max: 640 } as const;
 
@@ -103,17 +77,15 @@ export interface SessionState {
   activeTabId: string | null;
   mode: InteractionMode;
   tabs: SessionTab[];
-  /** 工作区条目（跨表共享，必须持久化） */
   workspace: RangeSnapshot[];
-  /** 用户设置（旧会话没有此字段 → 用默认值补齐） */
   settings: SessionSettings;
 }
 
+/** estimateBytes 会被 UI 频繁调用，实现内部缓存体积，避免为报个数字重读整条记录。 */
 export interface SessionStore {
   save(state: SessionState): Promise<void>;
   load(): Promise<SessionState | null>;
   clear(): Promise<void>;
-  /** 估算当前占用的近似字节数（用于 UI 提示） */
   estimateBytes(): Promise<number>;
 }
 
@@ -121,23 +93,18 @@ export interface SessionStore {
 /* 常量                                                                        */
 /* ========================================================================== */
 
-/** schema 版本。只有 1；将来加字段时在这里 +1 并在 migrateOrNull 里写迁移分支。 */
+/** schema 版本；加字段时 +1 并在 migrateOrNull 里写迁移分支。 */
 const DB_VERSION = 1;
 const STORE_NAME = 'state';
 const RECORD_KEY = 'session';
 const DEFAULT_DB_NAME = 'excel-preview-session';
 
-/**
- * open 请求的兜底超时。正常路径上不可能触发（同版本 open 不会被 block），
- * 但"恢复会话"在启动链路上，宁可 5 秒后当作没有会话，也不能让 UI 永远转圈。
- */
+/** open 的兜底超时：恢复会话在启动链路上，宁可 5 秒后当作没有会话，也不能让 UI 永远转圈。 */
 const OPEN_TIMEOUT_MS = 5_000;
 
-/** estimateStateBytes 里替换 Uint8Array 的占位符（见该函数注释） */
 const BYTES_PLACEHOLDER = '<originalBytes>';
 
 function warn(message: string, error?: unknown): void {
-  // 用 console.warn 而不是 throw：本地持久化只是"锦上添花"，坏了不能影响编辑
   console.warn(`[persistence] ${message}`, error === undefined ? '' : error);
 }
 
@@ -145,7 +112,6 @@ function noop(): void {
   /* 用于吞掉 promise 结果 */
 }
 
-/** 每次调用现查，避免模块加载时机影响判断（也便于单测注入假实现） */
 function hasIndexedDB(): boolean {
   return typeof indexedDB !== 'undefined' && indexedDB !== null;
 }
@@ -169,10 +135,8 @@ function transactionDone(tx: IDBTransaction): Promise<void> {
   });
 }
 
-/**
- * 打开（必要时创建）数据库。任何失败都以 `null` 收场，绝不 reject。
- * 每次操作都新开连接、用完就关，避免长期持有连接把 deleteDatabase / versionchange 卡住。
- */
+/** 打开（必要时创建）数据库，任何失败都以 `null` 收场、绝不 reject；每次操作新开连接、用完即关，
+ * 长期持有连接会把 deleteDatabase / versionchange 卡住。 */
 function openDatabase(name: string): Promise<IDBDatabase | null> {
   return new Promise<IDBDatabase | null>((resolve) => {
     let settled = false;
@@ -230,9 +194,8 @@ function openDatabase(name: string): Promise<IDBDatabase | null> {
     };
 
     request.onerror = () => {
-      // 版本不匹配（VersionError）也走这里：**故意不删库**。
-      // 能造成版本不匹配的只有"更新版本的应用写过同一个库名"，这时候删库等于
-      // 毁掉新版本的数据；我们只当作"本地没有可用的会话"。
+      // 版本不匹配（VersionError）也走这里：**故意不删库**——只有"更新版本的应用写过
+      // 同一个库名"才会版本不匹配，删库等于毁掉新版数据，只当"本地没有可用会话"。
       const error = request.error;
       if (error && error.name === 'VersionError') {
         warn(`本地库 "${name}" 的 schema 版本与应用不一致，忽略已存数据`);
@@ -243,8 +206,7 @@ function openDatabase(name: string): Promise<IDBDatabase | null> {
     };
 
     request.onblocked = () => {
-      // 只有在"别的连接持有更旧版本且不肯关闭"时才会触发；同版本下不会发生。
-      // 这里不 resolve，等 onsuccess/onerror，超时兜底。
+      // 仅在"别的连接持有更旧版本且不肯关闭"时触发；这里不 resolve，靠超时兜底
       warn(`本地库 "${name}" 被其它连接占用，等待中`);
     };
 
@@ -317,21 +279,14 @@ function isCellValue(value: unknown): value is string | number | boolean | null 
   return value === null || typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean';
 }
 
-/**
- * 运行时可接受的 mode 值。`satisfies` 保证它不会和 `InteractionMode` 联合类型跑偏
- * （interaction 层改名/删值会在这里编译报错）；新增值需要同步加进来。
- */
+/** 运行时可接受的 mode 值；`satisfies` 保证与 `InteractionMode` 不跑偏，新增值须同步加进来。 */
 const INTERACTION_MODES = ['select', 'drag', 'click-swap'] as const satisfies readonly InteractionMode[];
 
 function isInteractionMode(value: unknown): value is InteractionMode {
   return INTERACTION_MODES.some((mode) => mode === value);
 }
 
-/**
- * 把库里读出来的东西变成 Uint8Array。
- * 只接受"字节类"输入（Uint8Array / ArrayBuffer / TypedArray 视图），
- * **不接受 base64 字符串**——我们从不用那种形式存，出现即视为损坏。
- */
+/** 只接受"字节类"输入（Uint8Array / ArrayBuffer / TypedArray 视图）；**不接受 base64 字符串**——我们从不用那种形式存，出现即视为损坏。 */
 function toUint8Array(value: unknown): Uint8Array | null {
   if (value instanceof Uint8Array) return value;
   if (value instanceof ArrayBuffer) return new Uint8Array(value);
@@ -369,22 +324,16 @@ function migrateTabOrNull(raw: unknown): SessionTab | null {
     id,
     fileName,
     originalBytes: bytes,
-    // Univer 快照一定是普通对象；不是对象就等于没有快照（恢复时走重新导入路径）
+    // 快照必须是普通对象；否则当作没有快照（恢复时走重新导入路径）
     snapshot: isRecord(snapshot) ? snapshot : null,
     edits: migrated,
   };
 }
 
-/**
- * 校验 + 迁移本地数据。任何结构性损坏都返回 `null`（由调用方负责清理坏数据）。
- *
- * 严格程度的分工：
- *  - 顶层字段（version / savedAt / mode / tabs / workspace）**必须齐**，缺一个就算损坏；
- *  - tabs / edits 逐项严格校验（它们直接决定能否还原现场，宁可不恢复也不能还原出错的现场）；
- *  - activeTabId / snapshot / formula 这三个"本来就可以是 null"的字段容忍缺省；
- *  - workspace 项只校验"是对象且有 string id"：RangeSnapshot 归 workspace 模块所有，
- *    在这里做全字段深校验会把那个类型的正常演进误判成本地数据损坏。
- */
+/** 校验 + 迁移本地数据，结构性损坏即返回 `null`（调用方负责清理坏数据）。
+ * 顶层字段缺一即损坏；tabs/edits 逐项严格校验（宁可不恢复也不能还原出错现场）；
+ * workspace 项只校验"是对象且有 string id"：RangeSnapshot 归 workspace 模块所有，
+ * 在这里做全字段深校验会把该类型的正常演进误判成数据损坏。 */
 export function migrateOrNull(raw: unknown): SessionState | null {
   if (!isRecord(raw)) return null;
   if (raw.version !== 1) return null;
@@ -417,7 +366,7 @@ export function migrateOrNull(raw: unknown): SessionState | null {
     mode,
     tabs: migratedTabs,
     workspace: migratedWorkspace,
-    // 旧会话没有 settings → 用默认值补齐；有但字段非法 → 逐字段收敛
+    // 旧会话没有 settings → 默认值补齐；有但字段非法 → 逐字段收敛
     settings: normalizeSettings((raw as { settings?: unknown }).settings),
   };
 }
@@ -426,18 +375,10 @@ export function migrateOrNull(raw: unknown): SessionState | null {
 /* 体积估算                                                                    */
 /* ========================================================================== */
 
-/**
- * 近似占用字节数 = 原始 xlsx 字节总长 + 其余数据的 JSON 文本长度 × 2。
- *
- * 两个关键取舍：
- *  1. 序列化前把每个 tab 的 `originalBytes` 换成占位符。否则 `JSON.stringify` 会把
- *     Uint8Array 摊成 `{"0":12,"1":34,...}`，既慢又离谱（同一个字节能膨胀到 4 个字符）。
- *  2. 文本按 2 字节/字符算（UTF-8 下 ASCII 1 字节、中文 3 字节的折中），只要量级对得上，
- *     够 UI 提示用；不做精确计算、也不去真读全部数据。
- *
- * 注意：快照里如果有循环引用或 BigInt，JSON.stringify 会抛——这里吞掉并按"文本部分为 0"算，
- * 保证估算永远不会把 UI 弄崩。
- */
+/** 近似字节数 = 原始 xlsx 字节总长 + 其余数据的 JSON 文本长度 × 2。
+ * 序列化前把 originalBytes 换成占位符，否则 JSON.stringify 会把 Uint8Array 摊成 `{"0":12,...}`；
+ * 文本按 2 字节/字符算（ASCII 1 / 中文 3 的折中），量级对得上就够 UI 用。
+ * 快照有循环引用或 BigInt 时 JSON.stringify 会抛——吞掉并按"文本部分为 0"算，绝不能把 UI 弄崩。 */
 export function estimateStateBytes(state: SessionState): number {
   let rawBytes = 0;
   for (const tab of state.tabs) {
@@ -463,11 +404,8 @@ export function estimateStateBytes(state: SessionState): number {
 /* ========================================================================== */
 
 export function createSessionStore(dbName: string = DEFAULT_DB_NAME): SessionStore {
-  /**
-   * 最近一次写入/读出的体积缓存：estimateBytes() 是给 UI 频繁调用的，
-   * 有缓存就不必为了报个数字把整条记录（含几 MB 的 xlsx 字节）再读一遍。
-   * -1 表示"还不知道"，此时才回落到一次读。
-   */
+  /** 最近一次写入/读出的体积缓存：estimateBytes() 被 UI 频繁调用，避免为报个数字重读整条
+   * 记录（含几 MB 的 xlsx 字节）；-1 表示"还不知道"，此时才回落到一次读。 */
   let cachedBytes = -1;
 
   return {
@@ -562,10 +500,7 @@ export function createAutoSaver(
     }
   }
 
-  /**
-   * 排队一次写入。返回的 promise 在**这次**写入结束时 resolve（永不 reject，
-   * 这样调用方不会因为本地存储出错而拿到异常）。
-   */
+  /** 排队一次写入；返回的 promise 在**这次**写入结束时 resolve，永不 reject，调用方不会拿到异常。 */
   function enqueue(): Promise<void> {
     const run = tail.then(async () => {
       // 排队期间被 dispose 了就直接放弃，不再落盘

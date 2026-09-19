@@ -1,60 +1,31 @@
 /**
  * **`.xls`（Excel 97–2003，BIFF8 二进制）解析器。**
+ * 产出中性的 `WorkbookInput`，打成规范 xlsx 后复用既有预览/编辑/导出链路。不引第三方库：
+ * `.xls` 既不是 zip 也不是 XML，所以手写两层 —— CFB（OLE2：512 字节头 → FAT/DIFAT →
+ * 128 字节目录项 → 找 `Workbook`/`Book` 流）与 BIFF8 记录流（`[u16 id][u16 len][payload]`，按 `BOF`/`EOF` 切子流）。
+ * 小于 4096 字节（`_ulMiniSectorCutoff`）的流走迷你流 + 迷你 FAT，读流必须分两路。
  *
- * 产出中性的 `WorkbookInput`（见 `src/importer/synth-xlsx.ts`），随后被打成一份规范 xlsx，
- * 于是预览/编辑/工作区/撤销/导出/会话恢复全部复用既有链路 —— 与 CSV 一样，`.xls` 只是一条
- * "入口翻译"。**不引第三方库**：`.xls` 既不是 zip 也不是 XML，`fflate` / `xml.ts` 都帮不上忙，
- * 所以这里手写两层：
+ * 格式本身的坑：CFB 头"首个目录扇区"在偏移 **48**（`_sectDir`，44 是恒为 0 的 `_csectDir`）；
+ * FAT 链上 `0xFFFFFFFD`(FATSECT)/`0xFFFFFFFC`(DIFSECT) 只说明该扇区装 FAT/DIFAT，**不是链
+ * 结束**，链上遇到须跳过继续，只有 `0xFFFFFFFE`/`0xFFFFFFFF` 才结束；SST 的 CONTINUE 与普通
+ * 记录不同 —— 字符串跨段时新段首字节是该段压缩标志，须每段重读，`cstTotal`/`cstUnique` 只在
+ * 第一段里。
  *
- *  1. **CFB（Compound File Binary / OLE2 复合文档）**：512 字节头 → FAT（`_sectFat` + DIFAT）→
- *     目录项（128 字节/项）→ 找名为 `Workbook`（BIFF8）或 `Book`（BIFF5）的流。
- *     小于 4096 字节（`_ulMiniSectorCutoff`）的流走**迷你流 + 迷你 FAT**，所以"读一条流"必须
- *     分两路：普通 FAT 扇区链、迷你扇区链。**扇区链必须按 FAT 逐扇区拼接**：大工作簿的流一定
- *     跨很多扇区，而且可以是碎片化的非连续链（真夹具就是 `1..38 → 39..46 → 47..54 → 56`）。
- *  2. **BIFF8 记录流**：`[u16 id][u16 len][payload]`，再按 `BOF`/`EOF` 切成 globals 与各工作表子流。
- *
- * 三个真踩过的坑（都写进了测试）：
- *  - **CFB 头里"首个目录扇区"在偏移 48，不是 44**：偏移 44 是 `_csectDir`（目录扇区数，
- *    BIFF8 里恒为 0），偏移 48 才是 `_sectDir`。读错会把 BIFF 数据当目录项，表现为
- *    "文件里明明有 `Workbook` 流却找不到"。
- *  - **FAT 链上的特殊值不能当"链结束"**：`0xFFFFFFFD` 是 FATSECT（该扇区装 FAT 本身）、
- *    `0xFFFFFFFC` 是 DIFSECT，它们只说明"这个扇区是 FAT/DIFAT"，**不表示链到此为止**。
- *    只有 `0xFFFFFFFE`（ENDOFCHAIN）与 `0xFFFFFFFF`（FREESECT）才是结束。
- *    真夹具 `fixture-styles.xls` 的目录链就是 `…→54→（跳过 FAT 扇区 55）→56`，
- *    把 FATSECT 当结束会直接丢掉整个目录。
- *  - **SST 的 CONTINUE 与普通记录的 CONTINUE 规则不同**：普通记录跨 CONTINUE 只是把字节接起来；
- *    而 `SST` 里一条字符串如果正好跨过 CONTINUE 边界，**新 CONTINUE 的第一个字节不是字符数据，
- *    而是这一段的"压缩/非压缩"标志位**，必须每段重新读一次。SST 头部的 `cstTotal`/`cstUnique`
- *    也只在第一段里。
- *
- * 已知不支持（明确检测 + 如实报告，绝不硬猜）：
- *  - **加密工作簿**（`FILEPASS 0x002F`）：加密后 SST / 样式 / 单元格记录全被混淆，没有"部分解析"
- *    的可能 —— 直接返回空工作簿 + 中文警告，由上层提示用户；
- *  - **BIFF5/BIFF7/BIFF4**（`BOF` 版本 < 0x0600）：字符串是 8 位代码页而非 Unicode，产物会大面积
- *    乱码，因此不解析，返回空工作簿 + 中文警告；
- *  - **图表工作表 / 宏工作表 / 对话框工作表**（子流类型不是 0x0010）：跳过并逐个报告；
- *  - **公式体**：`FORMULA` 的 `rgce` 是 RPN 字节码，本模块**不反编译**，只搬缓存值
- *    （与既有"导入时用 Excel 缓存值渲染"的约定一致）；结果是错误值（`#DIV/0!` 等）时
- *    中性模型没有表达形式，如实丢弃并计数；
- *  - **富文本分段**：SST 字符串的 rich/phonetic 段按长度跳过，只取纯文本；
- *  - **条件格式 / 数据验证 / 批注 / 超链接 / 图片 / 透视表**：`.xls` 里分别由
- *    `CONDFMT`+`CF`、`DVAL`+`DV`、`NOTE`、`HLINK`、`MSODRAWING`+`OBJ`、`SX*` 承载，本模块不解析。
+ * 已知不支持（检测后给中文警告，绝不硬猜）：加密（`FILEPASS`）；BIFF5/7/4（`BOF` < 0x0600，
+ * 字符串是 8 位代码页会乱码）；图表/宏/对话框工作表子流；`FORMULA` 的 `rgce` 字节码不反编译、
+ * 只搬缓存值；富文本分段只取纯文本；条件格式/数据验证/批注/超链接/图片/透视表均不解析。
  */
 import { BUILTIN_NUM_FMTS, INDEXED_COLORS } from './styles';
 import type { SynthCell, SynthSheet, SynthStyle, WorkbookInput } from '../importer/synth-xlsx';
 
-/* -------------------------------------------------------------------------- */
-/* 常量与安全阀                                                                */
-/* -------------------------------------------------------------------------- */
+/* ---- 常量与安全阀 ---- */
 
 /** 单元格总量上限：超出后停止写入并如实报告（与 CSV 解析器同一口径） */
 export const MAX_XLS_CELLS = 200_000;
 /** 单表行列上限（与 xlsx 规范一致） */
 const MAX_ROWS = 1_048_576;
 const MAX_COLS = 16_384;
-/** CFB 头的长度；扇区数据从 512 字节之后开始 */
 const CFB_HEADER_SIZE = 512;
-/** 目录项长度 */
 const DIR_ENTRY_SIZE = 128;
 /** 一条扇区链最多走多少步（防御环状链；远大于任何真实文件） */
 const MAX_CHAIN_STEPS = 1 << 20;
@@ -62,7 +33,6 @@ const MAX_CHAIN_STEPS = 1 << 20;
 const DEFAULT_SECTOR_SHIFT = 9;
 const DEFAULT_MINI_SECTOR_SHIFT = 6;
 
-/* CFB 特殊扇区号 */
 const FREESECT = 0xffffffff;
 const ENDOFCHAIN = 0xfffffffe;
 /** 所有 >= 该值（且不是上面两个）的取值都不是普通数据扇区号 */
@@ -104,26 +74,19 @@ const REC = {
 /** BOF 子流类型（`BOF` 偏移 2 的 u16） */
 const SUBSTREAM = { WORKBOOK_GLOBALS: 0x0005, WORKSHEET: 0x0010, CHART: 0x0020, MACRO: 0x0040 } as const;
 
-/* -------------------------------------------------------------------------- */
-/* RK 解码                                                                     */
-/* -------------------------------------------------------------------------- */
-
 /**
- * 解码一个 `RK` 值（4 字节，按 i32 存放）。
- *
- * 为什么单独导出并配单元测试：RK 把"整数/浮点 × 原值/百分之一"四种情况压进 32 位，
- * 位运算写错一位就**静默**得到错数字（不抛异常、不越界），只能靠逐条断言兜住。
- *  - bit0（`0x01`）置位：真实值是解码结果的 **1/100**（Excel 用它存百分比与两位小数）；
- *  - bit1（`0x02`）置位：高 30 位是**有符号整数**（`i32 >> 2`，算术右移保住负号）；
- *  - bit1 清零：高 30 位是 **IEEE754 双精度的最高 30 位**，低 34 位补 0 ——
- *    把小端 i32 放到 8 字节缓冲的**高 4 字节**（低 4 字节保持 0）再按双精度读，即可无损还原。
+ * 解码一个 `RK` 值（4 字节按 i32 存放）。单独导出并配单元测试：位运算写错一位会**静默**出错，
+ * 只能靠断言兜住。
+ * bit0（`0x01`）= 真实值是结果的 **1/100**（存百分比与两位小数）；bit1（`0x02`）置位 = 高 30 位
+ * 是**有符号整数**（算术右移），清零则高 30 位是 **IEEE754 双精度最高 30 位**（小端 i32 放到
+ * 8 字节缓冲的高 4 字节再按 double 读即无损还原）。
  */
 export function decodeRk(raw: number): number {
   const isDiv100 = (raw & 0x01) !== 0;
   const isInteger = (raw & 0x02) !== 0;
   let value: number;
   if (isInteger) {
-    value = raw >> 2; // 算术右移：负数也正确
+    value = raw >> 2;
   } else {
     const view = new DataView(new ArrayBuffer(8));
     view.setUint32(4, raw & 0xfffffffc, true);
@@ -131,10 +94,6 @@ export function decodeRk(raw: number): number {
   }
   return isDiv100 ? value / 100 : value;
 }
-
-/* -------------------------------------------------------------------------- */
-/* 越界安全的字节读取                                                          */
-/* -------------------------------------------------------------------------- */
 
 function readU8(bytes: Uint8Array, offset: number): number | undefined {
   if (offset < 0 || offset >= bytes.length) return undefined;
@@ -178,11 +137,8 @@ function decodeUtf16Le(bytes: Uint8Array, offset: number, length: number): strin
 }
 
 /**
- * 8 位字符解码。
- *
- * 说明：BIFF8 的"压缩"字符串（flags 高位 = 0）**按规范就是 Latin-1**（每字节一个码位），
- * 不是代码页 —— 所以这里用一一映射而不是 `TextDecoder('gbk')`：字符集信息在 FONT 记录的
- * `grbit`/`chs` 里，逐串判代码页只会引入歧义。
+ * 8 位字符解码：BIFF8 的"压缩"字符串（flags 高位 = 0）**按规范就是 Latin-1**（每字节一个码位），
+ * 不是代码页 —— 代码页信息只在 FONT 记录里，逐串判只会引入歧义，所以用一一映射而非 `TextDecoder`。
  */
 function decodeLatin1(bytes: Uint8Array, offset: number, length: number): string {
   const end = Math.min(offset + length, bytes.length);
@@ -191,9 +147,7 @@ function decodeLatin1(bytes: Uint8Array, offset: number, length: number): string
   return out;
 }
 
-/* -------------------------------------------------------------------------- */
-/* CFB（复合文档）层                                                            */
-/* -------------------------------------------------------------------------- */
+/* ---- CFB（复合文档）层 ---- */
 
 interface CfbDirectoryEntry {
   name: string;
@@ -214,12 +168,7 @@ interface CfbContainer {
   entries: CfbDirectoryEntry[];
 }
 
-/**
- * 走一条**普通**扇区链，把各扇区原样拼接。
- *
- * 防御四件事：越界扇区号（文件被截断）、环状链、超长链、FAT 缺项 ——
- * 全部是"截断 + 中文警告"，绝不 `while (true)`。
- */
+/** 走一条**普通**扇区链，把各扇区原样拼接；越界扇区号、环状链、超长链、FAT 缺项一律"截断 + 中文警告"。 */
 function readSectorChain(
   container: CfbContainer,
   startSector: number,
@@ -254,8 +203,7 @@ function readSectorChain(
       stopReason = `FAT 里没有扇区 ${sector} 的项`;
       break;
     }
-    // 只有 ENDOFCHAIN / FREESECT 才是"链结束"；FATSECT/DIFSECT 只说明该扇区装的是 FAT/DIFAT，
-    // 出现在链上时必须跳过并继续（真夹具 fixture-styles.xls 的目录链是 …→54→55(FAT)→56）。
+    // 只有 ENDOFCHAIN / FREESECT 才是"链结束"；FATSECT/DIFSECT 只说明该扇区装 FAT/DIFAT，链上遇到须跳过继续。
     if (next === ENDOFCHAIN || next === FREESECT) break;
     sector = next;
     steps += 1;
@@ -310,12 +258,7 @@ function readMiniChain(
   return concatBytes(chunks);
 }
 
-/**
- * 解析 CFB 容器：头 → DIFAT/FAT → 目录 → 迷你流/迷你 FAT。
- *
- * 返回 `undefined` 表示"根本不是 CFB"（签名不对或文件太短）；其余问题都是
- * "尽量把能读的读出来 + 中文警告"，因为真文件偶尔带冗余扇区。
- */
+/** 解析 CFB 容器：头 → DIFAT/FAT → 目录 → 迷你流/迷你 FAT；`undefined` 只表示"根本不是 CFB"。 */
 function readCfb(bytes: Uint8Array, warnings: string[]): CfbContainer | undefined {
   if (bytes.length < CFB_HEADER_SIZE) {
     warnings.push(`文件只有 ${bytes.length} 字节，不足 CFB 头的 512 字节，不是 OLE2 复合文档`);
@@ -340,13 +283,11 @@ function readCfb(bytes: Uint8Array, warnings: string[]): CfbContainer | undefine
   const miniSectorSize = 1 << (validMiniShift ? miniSectorShift : DEFAULT_MINI_SECTOR_SHIFT);
   const sectorCount = Math.floor((bytes.length - CFB_HEADER_SIZE) / sectorSize);
   const miniCutoff = readU32(bytes, 56) ?? 4096;
-  // 注意：48 才是 _sectDir（首个目录扇区），44 是 _csectDir（目录扇区数，BIFF8 恒为 0）
   const firstDirSector = readU32(bytes, 48) ?? ENDOFCHAIN;
   const firstMiniFatSector = readU32(bytes, 60) ?? ENDOFCHAIN;
   const firstDifatSector = readU32(bytes, 68) ?? ENDOFCHAIN;
   const numDifatSectors = readU32(bytes, 72) ?? 0;
 
-  /** 只按扇区号取原始字节，不解析链（FAT/DIFAT 自身用） */
   const rawSector = (sector: number): Uint8Array | undefined => {
     if (sector < 0 || sector >= sectorCount) return undefined;
     const begin = CFB_HEADER_SIZE + sector * sectorSize;
@@ -452,9 +393,7 @@ function readCfbStream(container: CfbContainer, entry: CfbDirectoryEntry, bytes:
   return data.length > entry.size ? data.subarray(0, entry.size) : data;
 }
 
-/* -------------------------------------------------------------------------- */
-/* BIFF 记录流                                                                 */
-/* -------------------------------------------------------------------------- */
+/* ---- BIFF 记录流 ---- */
 
 interface BiffRecord {
   id: number;
@@ -464,10 +403,7 @@ interface BiffRecord {
   dataLength: number;
 }
 
-/**
- * 扫描记录表。遇到长度越界的记录（文件被截断 / 记录头是垃圾）就停下并记录原因 ——
- * 任何畸形输入都只会"少读一点"，不会死循环也不会抛异常。
- */
+/** 扫描记录表；长度越界的记录（截断 / 记录头是垃圾）停下并记录原因，不死循环也不抛异常。 */
 function scanRecords(stream: Uint8Array, warnings: string[]): BiffRecord[] {
   const records: BiffRecord[] = [];
   let at = 0;
@@ -514,9 +450,7 @@ function readChunked(stream: Uint8Array, records: readonly BiffRecord[], index: 
   return { chunks, continues };
 }
 
-/* -------------------------------------------------------------------------- */
-/* BIFF8 字符串                                                                */
-/* -------------------------------------------------------------------------- */
+/* ---- BIFF8 字符串 ---- */
 
 interface UnicodeStringResult {
   text: string;
@@ -528,14 +462,11 @@ interface UnicodeStringResult {
 
 /**
  * 读一条 **BIFF8 Unicode 字符串**（SST 用；rich/phonetic 段读完后自行跳过）。
- *
- * 布局（`XLUnicodeRichExtendedString`）：
- * `u16 cch` + `u8 flags`（`0x01` = 16 位字符、`0x04` = 有 `cExtRst`、`0x08` = 有 `cRun`）
- * + 可选 `u16 cRun` + 可选 `u32 cbExtRst` + 字符数据 + `cRun*4` 字节 rich 段 + `cbExtRst` 字节 phonetic 段。
- *
- * **跨 CONTINUE 的坑**：字符数据一旦跨段，新段的**首字节是这一段的编码标志**
- * （`0x01` = 16 位、`0x00` = 8 位），必须每段重新读一次，不能沿用上一段的编码。
- * 这也是 SST 的 CONTINUE 与普通记录 CONTINUE 的唯一区别。
+ * 布局 `XLUnicodeRichExtendedString`：`u16 cch` + `u8 flags`（`0x01` 16 位字符、`0x04` 有
+ * `cExtRst`、`0x08` 有 `cRun`）+ 可选 `u16 cRun` + 可选 `u32 cbExtRst` + 字符数据 + rich 段 +
+ * phonetic 段。
+ * **跨 CONTINUE 的坑**：字符数据一旦跨段，新段首字节是该段的编码标志（`0x01` 16 位 / `0x00`
+ * 8 位），必须每段重读 —— 这是 SST 的 CONTINUE 与普通记录的唯一区别。
  */
 function readUnicodeString(chunks: readonly Uint8Array[], startChunk: number, startPosition: number): UnicodeStringResult {
   let ci = startChunk;
@@ -619,16 +550,12 @@ function readUnicodeString(chunks: readonly Uint8Array[], startChunk: number, st
   return done(text, truncated);
 }
 
-/**
- * 读短 Unicode 字符串（`u8 cch` + `u8 flags` + 字符），用于 `BOUNDSHEET` 表名。
- * `cch` 最高位是"非压缩"标志位（BIFF8 的 `ShortXLUnicodeString` 允许两种写法）。
- */
+/** 读短 Unicode 字符串（`u8 cch` + `u8 flags` + 字符），用于 `BOUNDSHEET` 表名；`cch` 最高位是"非压缩"标志位。 */
 function readShortUnicodeString(bytes: Uint8Array, offset: number): string {
   const rawLength = readU8(bytes, offset);
   if (rawLength === undefined) return '';
   const cch = rawLength & 0x7f;
-  // 最高位置位表示"这是个 Unicode 串"（无论低 7 位怎么算），此时后面的 flags 字节可能不存在；
-  // 但 BOUNDSHEET 一律带 flags 字节，所以这里按"cch + flags + 字符"的规范布局读。
+  // 最高位置位表示"这是个 Unicode 串"，此时 flags 字节可能不存在；但 BOUNDSHEET 一律带 flags 字节。
   const flags = readU8(bytes, offset + 1) ?? 0;
   return (flags & 0x01) !== 0 || (rawLength & 0x80) !== 0
     ? decodeUtf16Le(bytes, offset + 2, cch * 2)
@@ -636,18 +563,14 @@ function readShortUnicodeString(bytes: Uint8Array, offset: number): string {
 }
 
 /**
- * 读 `FONT` 记录里的字体名。
- *
- * 为什么单独一个函数：`FONT` 的定长头在实现里是 **14 字节**（到 `unused3` 为止），
- * 紧接着是 `u8 cch` + `u8 flags` + 字符数据；真夹具上 `cch = <字符数>` 落在偏移 14、
- * `flags = 0x01` 落在偏移 15、字符从偏移 16 开始。若按"[MS-XLS] 的文字字段表"把
- * `bCharSet` 当成偏移 14 的独立字节去读，就会把"字符数"误当字符集、把名字整体错位一格，
- * 得到「卛」这样的乱码（真踩过）。这里按"数据自洽"来判：先用 `cch @14 + flags @15`
- * 试解，若长度对不上就在 `cch @15 + flags @16` 再试一次，两次都拿不出可打印字符串时留空。
+ * 读 `FONT` 记录里的字体名。`FONT` 的定长头在实现里是 **14 字节**（到 `unused3`），紧接
+ * `u8 cch` + `u8 flags` + 字符数据；若按 [MS-XLS] 字段表把 `bCharSet` 当偏移 14 的独立字节读，
+ * 名字会整体错位成乱码。所以按"数据自洽"判：先试 `cch @14 + flags @15`，长度对不上再试
+ * `cch @15 + flags @16`，两次都拿不出可打印字符串时留空。
  */
 function readFontName(data: Uint8Array): string {
   const layouts: Array<[number, number]> = [
-    [14, 15], // 真夹具的实际布局
+    [14, 15], // 真文件的实际布局
     [15, 16], // [MS-XLS] 字段表所描述的布局
   ];
   for (const [countAt, flagAt] of layouts) {
@@ -687,15 +610,10 @@ function readInlineString(bytes: Uint8Array, offset: number): string {
     : decodeLatin1(bytes, offset + 3, cch);
 }
 
-/* -------------------------------------------------------------------------- */
-/* 解析结果类型                                                                */
-/* -------------------------------------------------------------------------- */
-
 export interface XlsParseResult {
   input: WorkbookInput;
   /** 中文说明（不是错误，只是"哪些没解析/被跳过"），可直接展示给用户 */
   warnings: string[];
-  /** 计数统计：给报告与测试用，便于说清"到底丢了多少东西" */
   stats: Record<string, number>;
 }
 
@@ -709,24 +627,14 @@ interface SheetDescriptor {
   substreamType: number;
 }
 
-/**
- * 一条 XF 记录（BIFF8 的 `XF` 里内嵌 `CellXF`）。
- *
- * **边框与填充就在 XF 里**（不是靠下标去查另一张"边框表"）：`dgLeft/dgRight/dgTop/dgBottom`
- * 各 4 位是线型枚举，`icv*` 各 7 位是颜色索引，`fls` 6 位是填充图案、`icvFore/icvBack` 是填充色。
- * 曾按"BIFF8 用 BORDER 0x2085 独立记录集"实现，结果整张表都读不出边框与填充 —— 那是 BIFF5/7 的
- * 组织方式，BIFF8 已经内联进 `CellXF` 了。
- */
+/** 一条 XF 记录。**边框与填充就在 XF 里**（`dg*` 4 位线型、`icv*` 7 位颜色、`fls` 6 位图案）；独立的 `BORDER 0x2085` 只属于 BIFF5/7。 */
 interface XfRecord {
   fontIndex: number;
   formatIndex: number;
   /** 1 = 单元格样式 XF（不是给单元格用的） */
   isStyleXf: boolean;
-  /** 水平对齐（低 3 位） */
   horizontal: number;
-  /** 是否自动换行 */
   wrap: boolean;
-  /** 垂直对齐（3 位） */
   vertical: number;
   rotation: number;
   indent: number;
@@ -754,7 +662,6 @@ interface SheetLayout {
   gridlinesHidden?: boolean;
   defaultRowHeight?: number;
   defaultColWidth?: number;
-  /** 只统计用 */
   customRows: number;
   customCols: number;
 }
@@ -781,26 +688,15 @@ interface GlobalsInfo {
   layouts: SheetLayout[];
 }
 
-/* -------------------------------------------------------------------------- */
-/* 主入口                                                                      */
-/* -------------------------------------------------------------------------- */
-
 /**
- * **主入口：`.xls` 字节 → 中性工作簿。**
- *
- * 永远不抛异常：任何一层失败都退化成"空工作簿 + 中文警告"（上层据此提示用户）。
- * 需要"为什么没解析出来 / 丢了多少"时用 `parseXlsDetailed`，它返回同样的 `input` 加诊断信息。
+ * **主入口：`.xls` 字节 → 中性工作簿。** 永远不抛异常：任何一层失败都退化成"空工作簿 +
+ * 中文警告"。需要"为什么没解析出来 / 丢了多少"时用 `parseXlsDetailed`。
  */
 export function parseXls(bytes: Uint8Array): WorkbookInput {
   return parseXlsDetailed(bytes).input;
 }
 
-/**
- * 带诊断的入口：多返回 `warnings`（中文说明）与 `stats`（计数）。
- *
- * 为什么与 `parseXls` 分开：`parseXls` 的签名是给生产链路用的（只关心模型），
- * 而"哪些字段没解析出来、丢了多少"必须能对用户讲清楚，这部分不该塞进 `WorkbookInput`。
- */
+/** 带诊断的入口：多返回 `warnings`（中文说明）与 `stats`（计数），这些不该塞进 `WorkbookInput`。 */
 export function parseXlsDetailed(bytes: Uint8Array): XlsParseResult {
   const warnings: string[] = [];
   const stats: Record<string, number> = {
@@ -840,7 +736,7 @@ export function parseXlsDetailed(bytes: Uint8Array): XlsParseResult {
   }
   stats.records = records.length;
 
-  // ---- 版本判定：BIFF8 = 0x0600；更早的版本用 8 位代码页存字符串，产物会乱码，因此不解析 ----
+  // ---- 版本判定：BIFF8 = 0x0600；更早版本用 8 位代码页存字符串，产物乱码，因此不解析 ----
   const biffVersion = readU16(stream, records[0].dataOffset) ?? 0;
   stats.biffVersion = biffVersion;
   if (biffVersion < 0x0600) {
@@ -892,10 +788,6 @@ export function parseXlsDetailed(bytes: Uint8Array): XlsParseResult {
   return { input, warnings, stats };
 }
 
-/* -------------------------------------------------------------------------- */
-/* globals 子流                                                                */
-/* -------------------------------------------------------------------------- */
-
 function parseGlobals(
   stream: Uint8Array,
   records: readonly BiffRecord[],
@@ -914,7 +806,6 @@ function parseGlobals(
     layouts: [],
   };
 
-  // globals 到第一个 EOF 为止
   let end = records.length;
   for (let i = 1; i < records.length; i += 1) {
     if (records[i].id === REC.EOF) {
@@ -973,7 +864,6 @@ function parseGlobals(
     }
   }
 
-  // 定位各子流的 BOF 并读类型
   const indexByOffset = new Map<number, number>();
   records.forEach((record, index) => indexByOffset.set(record.offset, index));
   for (const sheet of info.sheets) {
@@ -995,14 +885,7 @@ function parseGlobals(
   return info;
 }
 
-/**
- * 解析 SST（共享字符串表）。
- *
- * 两条规则必须分开处理（最容易写错的地方）：
- *  1. `cstTotal`（含重复的引用数）与 `cstUnique`（去重后的条数）**只在第一段**里，
- *     后续 CONTINUE 直接续字符串数据；**只读 `cstUnique` 条**（按 `cstTotal` 读会越过字符串区）；
- *  2. 字符串跨 CONTINUE 时，新段首字节是编码标志 —— 这条由 `readUnicodeString` 负责。
- */
+/** 解析 SST：`cstTotal`/`cstUnique` **只在第一段**，且**只读 `cstUnique` 条**（按 `cstTotal` 读会越过字符串区）。 */
 function parseSst(payload: ChunkedPayload, warnings: string[], stats: Record<string, number>): string[] {
   const out: string[] = [];
   const first = payload.chunks[0];
@@ -1050,36 +933,20 @@ function parseFont(data: Uint8Array): FontRecord {
 }
 
 /**
- * 解析 `XF (0x00E0)`。
- *
- * 布局（[MS-XLS] 2.4.353 `XF` + 2.5.20 `CellXF`，共 20 字节）：
- * ```
- *  0..1  ifnt        字体索引
- *  2..3  ifmt        数字格式索引
- *  4     fLocked(1) fHidden(1) fStyle(1) f123Prefix(1) + ixfParent 低 4 位
- *  5     ixfParent 高 8 位
- *  6     alc(3) fWrap(1) alcV(3) fJustLast(1)
- *  7     trot        文字旋转
- *  8     cIndent(4) fShrinkToFit(1) reserved(3)
- *  9..15 边框：dgLeft/dgRight/dgTop/dgBottom 各 4 位 + icvLeft/icvRight/icvTop/icvBottom 各 7 位
- * 16..17 grbitDiag(2) dgDiag(4) fHasXFExt(1) fls(6) fsxButton(1) reserved(1)
- * 18..19 icvFore(7) icvBack(7) reserved(2)
- * ```
- * 注意 `alc`/`alcV` **不是**同一个字节里的两个 4 位字段：`alc` 占 3 位、`fWrap` 占 1 位，
- * 所以 `alcV` 从第 4 位才开始（把 `0x12` 当成"左对齐+居中"就会把居中读成"自动换行关闭"）。
+ * 解析 `XF (0x00E0)`，即 [MS-XLS] 的 `XF` + `CellXF`（共 20 字节）：
+ * `0..1 ifnt`、`2..3 ifmt`、`4 fLocked/fHidden/fStyle/f123Prefix + ixfParent 低 4 位`、
+ * `6 alc(3) fWrap(1) alcV(3) fJustLast(1)`、`7 trot`、`8 cIndent(4) fShrinkToFit(1)`、
+ * `9..15` 边框（`dg*` 各 4 位 + `icv*` 各 7 位）、`16..17 grbitDiag(2) dgDiag(4) fHasXFExt(1)
+ * fls(6) fsxButton(1)`、`18..19 icvFore/icvBack`。
+ * 注意 `alc` 占 3 位、`fWrap` 占 1 位，所以 `alcV` 从第 4 位才开始（把 `0x12` 当成"左对齐+
+ * 居中"就会把居中读成"自动换行关闭"）。
  */
 function parseXf(data: Uint8Array): XfRecord {
   const byte4 = readU8(data, 4) ?? 0;
   const byte6 = readU8(data, 6) ?? 0;
   const byte8 = readU8(data, 8) ?? 0;
 
-  /**
-   * 从**偏移 9** 起的连续位流读取任意位宽的字段（小端位序）。
-   *
-   * 为什么必须按位读：边框区 16+7+7+2+7+7 位 + 填充区 6 位一共 54 位，
-   * 字段之间**没有字节对齐**（`icvRight` 从第 23 位开始，`fls` 从第 52 位开始）。
-   * 按字节/半字节去取会得到"边框线型大致对、颜色全乱"的结果 —— 真踩过。
-   */
+  /** 从**偏移 9** 起的位流按位读字段（小端位序）：边框 + 填充共 54 位且**无字节对齐**，按字节取会颜色全乱。 */
   const bits = (bitOffset: number, bitCount: number): number => {
     let value = 0;
     for (let i = 0; i < bitCount; i += 1) {
@@ -1117,10 +984,6 @@ function parseXf(data: Uint8Array): XfRecord {
     fillBackground: bits(65, 7),
   };
 }
-
-/* -------------------------------------------------------------------------- */
-/* 工作表：单元格                                                              */
-/* -------------------------------------------------------------------------- */
 
 function parseSheetCells(
   stream: Uint8Array,
@@ -1235,18 +1098,9 @@ function parseSheetCells(
         if (row === undefined || col === undefined || xf === undefined) break;
         const cell: PendingCell = { row, col, xf, blank: false };
         /**
-         * 8 字节"结果字段"（记录内偏移 6..13）有两种编码（BIFF8 规范；实测 `fixture-multi.xls`
-         * 的 `第二张!C2`（`IF(...)` 结果是文本 "大"）走的就是特殊值这条）：
-         *  - **普通数值**：IEEE754 小端 double；
-         *  - **特殊值**：结果字段的**最后两个字节**是 `FF FF`，此时**第一个字节**才是类型 ——
-         *    `0` 字符串（真文本在下一条 `STRING` 记录里）、`1` 布尔（取值在第三个字节）、
-         *    `2` 错误值（不猜文本，只保留样式）、`3` 空串。
-         * 实测踩过的两个坑，都由 `fixture-multi.xls` 当场抓住：
-         *  ① 早先按 `grbit` 的位判断结果类型，而真文件里那条字符串结果的 `grbit` 是 `0x0020`，
-         *     判断落空 → 把 `FF FF` 当 double 读成了 **NaN**（用户会在格子里看到 "NaN"）；
-         *  ② 换成按字节标记判断后，偏移写错了一格（读成记录开头而不是结果字段），
-         *     于是"字符串结果"这条又没识别到，值变成空。
-         * 现在：只有 `结果字段[6..7] === FF FF` 才算特殊值，类型看 `结果字段[0]`。
+         * 8 字节"结果字段"（偏移 6..13）：普通数值是 IEEE754 小端 double；末两字节为 `FF FF` 则是
+         * **特殊值**，类型看第一个字节 —— `0` 字符串（在后续 `STRING` 里）、`1` 布尔、`2` 错误值
+         * （只保留样式）、`3` 空串。按 `grbit` 位判会把 `FF FF` 当 double 读成 NaN。
          */
         const resultField = 6;
         const special = data[resultField + 6] === 0xff && data[resultField + 7] === 0xff;
@@ -1255,7 +1109,6 @@ function parseSheetCells(
           if (kind === 0) waitingString = cell;
           else if (kind === 1) cell.value = data[resultField + 2] !== 0;
           else if (kind === 3) cell.value = '';
-          // kind === 2（错误值）：中性模型没有错误值的表达形式，丢掉值、保留样式
         } else {
           const cached = readF64(data, resultField);
           if (cached === undefined) break;
@@ -1310,10 +1163,6 @@ function pushCell(
   if (row >= MAX_ROWS || col >= MAX_COLS) return;
   cells.push(value === undefined ? { row, col, xf, blank } : { row, col, xf, blank, value });
 }
-
-/* -------------------------------------------------------------------------- */
-/* 工作表：版式（合并/列宽/行高/冻结/网格线）                                     */
-/* -------------------------------------------------------------------------- */
 
 function emptyLayout(): SheetLayout {
   return { merges: [], colWidths: {}, rowHeights: {}, customRows: 0, customCols: 0 };
@@ -1417,15 +1266,9 @@ function parseSheetLayout(
   return layout;
 }
 
-/* -------------------------------------------------------------------------- */
-/* 样式翻译                                                                    */
-/* -------------------------------------------------------------------------- */
-
 /**
- * 把 XF / FONT / FORMAT / PALETTE / BORDER 翻译成"XF 下标 → 中性样式"的表。
- *
- * 为什么做成表而不是逐格翻译：`SynthCell.style` 是**下标**语义，同一张表里成百上千个格子
- * 往往只有十几种 XF；先去重能让下游 writer 的 font/fill/border intern 命中同一批对象。
+ * 把 XF / FONT / FORMAT / PALETTE 翻译成"XF 下标 → 中性样式"的表。做成表而非逐格翻译：
+ * `SynthCell.style` 是下标语义，一张表往往只有十几种 XF，先去重能让下游 intern 命中同一批对象。
  */
 function buildXfStyles(
   globals: GlobalsInfo,
@@ -1436,8 +1279,7 @@ function buildXfStyles(
   let fontMissing = 0;
 
   for (const xf of globals.xfTable) {
-    // 样式 XF（fStyle = 1）只用来描述"单元格样式"，不直接作用于单元格；单元格引用它们时
-    // 继承属性，但真夹具里单元格直接引用带完整属性的 XF，所以这里如实翻译每一条即可。
+    // 样式 XF（fStyle = 1）本应只描述单元格样式由单元格继承，但真文件里单元格直接引用带完整属性的 XF。
     const style: SynthStyle = {};
     const font = globals.fontTable[xf.fontIndex];
     if (font) {
@@ -1521,10 +1363,7 @@ function buildXfStyles(
   return table;
 }
 
-/**
- * BIFF8 边框线型（边框项的低 4 位）→ 中性线型名。
- * 该枚举与 OOXML 的 `ST_BorderStyle` 同构，因此这一步翻译是无损的。
- */
+/** BIFF8 边框线型（边框项低 4 位）→ 中性线型名，枚举与 OOXML 的 `ST_BorderStyle` 同构，翻译无损。 */
 const BORDER_STYLES: Readonly<Record<number, string | undefined>> = {
   0: undefined, // 无线
   1: 'thin',
@@ -1568,10 +1407,6 @@ function colLetter(col: number): string {
   } while (n >= 0);
   return out;
 }
-
-/* -------------------------------------------------------------------------- */
-/* 组装中性工作簿                                                              */
-/* -------------------------------------------------------------------------- */
 
 function buildWorkbook(
   globals: GlobalsInfo,

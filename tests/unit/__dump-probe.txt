@@ -1,8 +1,0 @@
-table=table:table open=244..589
-child table:table-header-rows self=false attrs={}
-  grand table:table-row self=false
-    great table:table-cell self=false attrs={"office:value-type":"string"}
-child table:table-row self=false attrs={}
-  grand table:table-cell self=false
-    great text:p self=false attrs={}
-nameMatches(table-row)=true local=table-row

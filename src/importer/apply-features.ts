@@ -1,26 +1,10 @@
-/**
- * 把解析出来的"非单元格"特性应用到 Univer 工作表上：
- * 条件格式、数据验证、超链接、批注、浮动图片。
- *
- * 调用时机：`createWorkbook` 之后、安装"仅内容可编辑"锁**之前**。
- * 每一项独立容错：单条规则失败只记入 `failed`，不影响其它规则与整份文件。
- *
- * 实现约定（全部按 `node_modules/@univerjs/*` 的 facade `.d.ts` 与运行时核对过）：
- *  - 条件格式：`fWorksheet.newConditionalFormattingRule()` → `when* / setColorScale /
- *    setDataBar / setIconSet` → `setRanges([IRange])` → `build()` → `addConditionalFormattingRule()`
- *  - 数据验证：`univerAPI.newDataValidation()` → `require*`（或先 `build()` 再
- *    `setCriteria()`，textLength/time 没有专用方法）→ `setAllowBlank/setOptions`
- *    → `fWorksheet.getRange(a1).setDataValidation(rule)`
- *  - 超链接：`fWorksheet.getRange(ref).setHyperLink(url, label)`；表内跳转的 url 用
- *    `FRange.getUrl()` 生成（`#gid=<sheetId>&range=<n>`）
- *  - 批注：`fWorksheet.getRange(ref).createOrUpdateNote(ISheetNote)`
- *  - 图片：`fWorksheet.newOverGridImage().setSource(objectUrl, ImageSourceType.URL)...buildAsync()`
- *    → `insertImages([image])`
- *
- * 计数含义：
- *  - `failed`：本条特性尝试应用但失败（Facade 抛错 / 区域非法 / 数值转不出来 / 媒体字节缺失…）
- *  - `skipped`：本条特性在 Univer API 里无法表达，主动放弃（未识别的图标集名、absoluteAnchor…）
- *  - 两者都会往 `issues` 写一条可读原因；"成功但有降级"（如 dxf 边框无法表达）只写 issue 不计数。
+/** 把解析出的非单元格特性（条件格式/数据验证/超链接/批注/浮动图片）应用到 Univer 工作表。
+ *  必须在 `createWorkbook` 之后、安装"仅内容可编辑"锁之前调用；每项独立容错，单条失败只计入 `failed`。
+ *  Facade 顺序按 `.d.ts` 与运行时核对过（顺序错就不生效）：条件格式 `when* / set*` → `setRanges` → `build()`
+ *  → `addConditionalFormattingRule()`；数据验证 `newDataValidation()` → `setCriteria/setOptions` →
+ *  `getRange(ref).setDataValidation()`；图片 `setSource(url, ImageSourceType.URL)` → `buildAsync()`
+ *  → `insertImages()`。
+ *  计数：`failed`=尝试后失败，`skipped`=Univer 表达不了而主动放弃，两者都写 `issues`；成功但降级只写 issue 不计数。
  */
 import {
   DataValidationOperator,
@@ -31,8 +15,8 @@ import {
 } from '@univerjs/core';
 import type { FUniver } from '@univerjs/core/facade';
 import type { FRange, FWorksheet } from '@univerjs/sheets/facade';
-// 副作用导入：Facade mixin 通过 `declare module` 增强 FWorksheet/FRange/FEnum 的类型，
-// 必须让这些模块进入编译单元；运行时的注册由 src/univer/setup.ts 的 preset 完成（同一模块实例）。
+// 副作用导入：Facade mixin 靠 `declare module` 补 FWorksheet/FRange/FEnum 类型，必须让这些模块进编译单元；
+// 运行时注册由 src/univer/setup.ts 的 preset 完成（同一模块实例）。
 import '@univerjs/sheets-conditional-formatting/facade';
 import '@univerjs/sheets-data-validation/facade';
 import '@univerjs/sheets-drawing/facade';
@@ -67,13 +51,10 @@ export interface ApplyFeatureCounts {
 
 export interface ApplyFeaturesResult {
   counts: ApplyFeatureCounts;
-  /** 失败/跳过的细节，供"降级报告"与排查使用 */
   issues: string[];
 }
 
-/* ==========================================================================
- * 常量与工具
- * ======================================================================== */
+/* ==== 常量与工具 ==== */
 
 /** EMU → px：1 英寸 = 914400 EMU = 96px */
 const EMU_PER_PX = 9525;
@@ -84,23 +65,16 @@ const NOTE_HEIGHT = 72;
 const DEFAULT_DATA_BAR_COLOR = '#638EC6';
 
 /**
- * 插图用的 blob url：**按工作簿登记**，工作簿被释放（关标签 / 冷存）时统一回收。
- *
- * 为什么**不能立刻** revoke：图片服务是"插图之后再按 url 取图"的异步流程，
- * 马上 revoke 会让图片变空白 —— 所以 url 的生命周期要**跟着工作簿走**，而不是跟着这次插入走。
- *
- * 为什么**也不能**像以前那样"登记进一个 Set 然后页面生命周期内永不回收"（真实内存泄漏）：
- * 每个 url 都会把它背后的图片字节一直钉在内存里。打开若干份带图的表再关掉，这些字节
- * 一个都还不了（更糟的是冷存标签时，工作簿都 dispose 了、图片字节却还留着）。
- * 释放时机是安全的：`disposeUnit` 之后该簿的图片服务不会再取图；冷存标签切回时会重新走
- * `applyWorkbookFeatures` 重新插图、重新建 url（见 `App.tsx` 的 `buildTabUnit`）。
+ * 插图 blob url 按工作簿登记，随工作簿释放。图片服务是"插图之后再按 url 取图"的异步流程，
+ * 立刻 revoke 会让图片变空白，所以 url 生命周期必须跟着工作簿走；而"登记后页面生命周期内永不回收"
+ * 会把每张图的字节永久钉在内存里（真实泄漏）。释放时机安全：`disposeUnit` 后该簿不会再取图，
+ * 冷存标签切回时会重新走 `applyWorkbookFeatures` 重新插图、重新建 url。
  */
 const objectUrlsByWorkbook = new Map<string, Set<string>>();
 
 /** 拿不到 unitId 时的兜底桶（仍会被 `releaseAllImageObjectUrls` 回收） */
 const UNKNOWN_WORKBOOK = '__unknown__';
 
-/** 登记一个"要跟着工作簿活着"的 blob url（由 `applyImages` 调用） */
 export function retainImageObjectUrl(workbookId: string, url: string): void {
   let urls = objectUrlsByWorkbook.get(workbookId);
   if (!urls) {
@@ -118,15 +92,12 @@ export function releaseImageObjectUrl(workbookId: string, url: string): void {
   try {
     URL.revokeObjectURL(url);
   } catch {
-    /* 释放失败也不影响其它 url */
+    // 忽略
   }
   if (urls.size === 0) objectUrlsByWorkbook.delete(workbookId);
 }
 
-/**
- * 释放某个工作簿的全部插图 blob url，返回释放个数。
- * 关标签、冷存标签（工作簿被 dispose）时调用。
- */
+/** 释放某个工作簿的全部插图 blob url（关标签 / 冷存时调用），返回释放个数 */
 export function releaseWorkbookImageObjectUrls(workbookId: string): number {
   const urls = objectUrlsByWorkbook.get(workbookId);
   if (!urls) return 0;
@@ -150,24 +121,19 @@ export function releaseAllImageObjectUrls(): number {
   return released;
 }
 
-/** 诊断/测试用：当前还挂着多少个未被回收的插图 blob url */
 export function countRetainedImageObjectUrls(): number {
   let total = 0;
   for (const urls of objectUrlsByWorkbook.values()) total += urls.size;
   return total;
 }
 
-/** 诊断/测试用：按工作簿看分布 */
 export function retainedImageObjectUrlsByWorkbook(): Record<string, number> {
   const result: Record<string, number> = {};
   for (const [workbookId, urls] of objectUrlsByWorkbook) result[workbookId] = urls.size;
   return result;
 }
 
-/**
- * Excel OOXML 的 iconSet 名 → Univer `IIconSetType` 名。
- * Univer 的枚举值就是 Excel 的名字，这里显式列出以便复核；未列出的名字一律跳过并记 issue。
- */
+/** Excel OOXML 的 iconSet 名 → Univer 枚举名（两者同名，显式列出以便复核）；未列出的跳过并记 issue */
 const ICON_SET_NAME_MAP: Record<string, string> = {
   '3Arrows': '3Arrows',
   '3ArrowsGray': '3ArrowsGray',
@@ -218,10 +184,7 @@ function errorText(error: unknown): string {
   return String(error);
 }
 
-/**
- * 取当前工作表所属工作簿的 unitId（插图 blob url 按它归档）。
- * 取不到时落到兜底桶：宁可"晚一点释放"，也不能在这里抛异常打断导入。
- */
+/** 取工作簿 unitId（插图 blob url 按它归档）；取不到落兜底桶——宁可晚释放，也不能抛错打断导入 */
 function workbookIdOf(ctx: FeatureContext): string {
   try {
     return ctx.fWorksheet.getWorkbook().getUnitId() ?? UNKNOWN_WORKBOOK;
@@ -230,7 +193,6 @@ function workbookIdOf(ctx: FeatureContext): string {
   }
 }
 
-/** 去掉 OOXML 里的外层双引号（列表字面量、文本比较值都用它包裹） */
 function stripQuotes(raw: string): string {
   const text = raw.trim();
   if (text.length >= 2 && text.startsWith('"') && text.endsWith('"')) return text.slice(1, -1);
@@ -244,7 +206,6 @@ function withEquals(raw: string): string {
   return text.startsWith('=') ? text : `=${text}`;
 }
 
-/** 字符串 → 数字；转不出来返回 null（调用方决定跳过还是兜底） */
 function toNumber(raw: string | undefined): number | null {
   if (raw === undefined) return null;
   const text = stripQuotes(raw).replace(/^=/, '');
@@ -253,7 +214,6 @@ function toNumber(raw: string | undefined): number | null {
   return Number.isFinite(value) ? value : null;
 }
 
-/** Excel 颜色（#RRGGBB / RRGGBB / FFRRGGBB）统一成 #RRGGBB */
 function normalizeColor(raw: string | undefined): string | undefined {
   if (!raw) return undefined;
   const text = raw.trim();
@@ -312,9 +272,7 @@ function resolveRanges(ctx: FeatureContext, refs: string[]): IRange[] {
   return ranges;
 }
 
-/* ==========================================================================
- * 主入口
- * ======================================================================== */
+/* ==== 主入口 ==== */
 
 export async function applySheetFeatures(
   univerAPI: FUniver,
@@ -344,9 +302,7 @@ export async function applySheetFeatures(
   return { counts, issues };
 }
 
-/* ==========================================================================
- * 1) 条件格式
- * ======================================================================== */
+/* ==== 1) 条件格式 ==== */
 
 /** `whenCellEmpty()` 的返回类型（同一个 builder 类的其它 when / set 分支返回值类型相同） */
 type HighlightBuilder = ReturnType<FConditionalFormattingBuilder['whenCellEmpty']>;
@@ -369,7 +325,6 @@ function applyConditionalFormats(ctx: FeatureContext): void {
   });
 }
 
-/** @returns 是否成功落到工作表 */
 function buildConditionalFormat(
   ctx: FeatureContext,
   rule: ConditionalFormatRule,
@@ -391,14 +346,12 @@ function buildConditionalFormat(
   }
 }
 
-/** dxf 样式：优先用解析层直接给出的 dxf，退化到 parsed.dxfStyles[dxfId] */
 function resolveDxf(ctx: FeatureContext, rule: ConditionalFormatRule): CfDxfStyle | undefined {
   if (rule.dxf) return rule.dxf;
   if (rule.dxfId === undefined) return undefined;
   return ctx.parsed.dxfStyles?.[rule.dxfId];
 }
 
-/** 按 ruleType + operator 选择 highlight 分支；返回 null 表示已记 issue 且放弃 */
 function createHighlightBuilder(
   ctx: FeatureContext,
   rule: ConditionalFormatRule,
@@ -447,13 +400,11 @@ function createHighlightBuilder(
     }
   }
 
-  // 文本类
   if (ruleType === 'containstext') return factory.whenTextContains(text);
   if (ruleType === 'notcontainstext') return factory.whenTextDoesNotContain(text);
   if (ruleType === 'beginswith') return factory.whenTextStartsWith(text);
   if (ruleType === 'endswith') return factory.whenTextEndsWith(text);
 
-  // 公式
   if (ruleType === 'expression') {
     if (!rule.formula1) {
       fail(ctx, `${label}：expression 规则没有 formula1，已跳过`);
@@ -462,13 +413,11 @@ function createHighlightBuilder(
     return factory.whenFormulaSatisfied(withEquals(rule.formula1));
   }
 
-  // 重复值 / 唯一值 / 空值
   if (ruleType === 'duplicatevalues') return factory.setDuplicateValues();
   if (ruleType === 'uniquevalues') return factory.setUniqueValues();
   if (ruleType === 'containsblanks') return factory.whenCellEmpty();
   if (ruleType === 'notcontainsblanks') return factory.whenCellNotEmpty();
 
-  // 平均值
   if (ruleType === 'aboveaverage') return factory.setAverage(numberOperator.greaterThan);
   if (ruleType === 'belowaverage') return factory.setAverage(numberOperator.lessThan);
 
@@ -510,7 +459,7 @@ function applyHighlightRule(
   if (dxf) {
     const fill = normalizeColor(dxf.fill);
     const fontColor = normalizeColor(dxf.color);
-    // 注意顺序：先 when*/set* 选分支，再挂样式，最后 setRanges/build
+    // 注意顺序：先 when* / set* 选分支，再挂样式，最后 setRanges/build
     if (fill) builder.setBackground(fill);
     if (fontColor) builder.setFontColor(fontColor);
     if (dxf.bold) builder.setBold(true);
@@ -524,7 +473,6 @@ function applyHighlightRule(
   return true;
 }
 
-/** Excel cfvo → Univer IValueConfig */
 function cfvoToValueConfig(
   ctx: FeatureContext,
   cfvo: CfValueObject | undefined,
@@ -624,7 +572,6 @@ function applyDataBarRule(
   return true;
 }
 
-/** 图标集名字 → Univer 枚举值（用运行时枚举做白名单，映射不到返回 undefined） */
 function lookupIconType(ctx: FeatureContext, excelName: string): IIconSet['config'][number]['iconType'] | undefined {
   const mapped = ICON_SET_NAME_MAP[excelName];
   if (!mapped) return undefined;
@@ -681,9 +628,7 @@ function applyIconSetRule(
   return true;
 }
 
-/* ==========================================================================
- * 2) 数据验证
- * ======================================================================== */
+/* ==== 2) 数据验证 ==== */
 
 /** 把 criteria 写进 builder 并产出可提交的规则（textLength/time 走 build 后的 setCriteria） */
 type DataValidationPlan = (builder: FDataValidationBuilder) => ReturnType<FDataValidationBuilder['build']>;
@@ -867,7 +812,6 @@ function planDataValidation(ctx: FeatureContext, rule: DataValidationRule, label
       fail(ctx, `${label}：文本长度缺少 formula1/formula2，已跳过`);
       return null;
     }
-    // textLength 没有专用 require* 方法，用 setCriteria(DataValidationType.TEXT_LENGTH)
     return planByCriteria(
       DataValidationType.TEXT_LENGTH,
       rule,
@@ -902,7 +846,6 @@ function planDataValidation(ctx: FeatureContext, rule: DataValidationRule, label
   return null;
 }
 
-/** 列表验证的"区域引用"形式 */
 function resolveValidationRange(ctx: FeatureContext, ref: string, label: string): FRange | null {
   const { sheetName, a1 } = splitLocation(ref);
   const sheet = sheetName ? ctx.univerAPI.getActiveWorkbook()?.getSheetByName(sheetName) : ctx.fWorksheet;
@@ -918,9 +861,7 @@ function resolveValidationRange(ctx: FeatureContext, ref: string, label: string)
   }
 }
 
-/* ==========================================================================
- * 3) 超链接
- * ======================================================================== */
+/* ==== 3) 超链接 ==== */
 
 async function applyHyperlinks(ctx: FeatureContext): Promise<void> {
   const links = ctx.sheet.hyperlinks ?? [];
@@ -961,8 +902,7 @@ function resolveHyperlinkUrl(ctx: FeatureContext, link: ParsedHyperlink, label: 
   const { sheetName, a1 } = splitLocation(location);
   const sheet = sheetName ? ctx.univerAPI.getActiveWorkbook()?.getSheetByName(sheetName) : ctx.fWorksheet;
   if (!sheet) {
-    // 表内跳转指向了本工作簿里不存在的工作表（样本与真实文件里都会出现这种失效引用）：
-    // 仍然把 location 原样作为内链负载写进去，保证"链接没丢"，同时记一条降级说明。
+    // 表内跳转指向工作簿里不存在的工作表（真实文件常见）：仍把 location 原样写进去，保证链接不丢
     ctx.issues.push(
       `${label}：表内跳转目标工作表「${sheetName ?? ''}」不存在，已保留原始 location 作为链接负载（点击时 Univer 会提示引用无效）`,
     );
@@ -976,9 +916,7 @@ function resolveHyperlinkUrl(ctx: FeatureContext, link: ParsedHyperlink, label: 
   }
 }
 
-/* ==========================================================================
- * 4) 批注（legacy note）
- * ======================================================================== */
+/* ==== 4) 批注（legacy note） ==== */
 
 function applyNotes(ctx: FeatureContext): void {
   const notes = ctx.sheet.notes ?? [];
@@ -993,7 +931,6 @@ function applyNotes(ctx: FeatureContext): void {
         col: rect.startColumn,
         width: NOTE_WIDTH,
         height: NOTE_HEIGHT,
-        // 文本原样保留（含 \n），由批注 UI 负责换行渲染
         note: note.text,
         show: false,
       };
@@ -1010,13 +947,10 @@ function applyNotes(ctx: FeatureContext): void {
   });
 }
 
-/* ==========================================================================
- * 5) 浮动图片
- * ======================================================================== */
+/* ==== 5) 浮动图片 ==== */
 
 async function applyImages(ctx: FeatureContext): Promise<void> {
   const images = ctx.sheet.images ?? [];
-  // 这一批图片的 url 全部登记到**所在工作簿**名下，关标签/冷存时整簿回收
   const workbookId = workbookIdOf(ctx);
 
   for (const [index, image] of images.entries()) {
@@ -1036,7 +970,6 @@ async function applyImages(ctx: FeatureContext): Promise<void> {
       const buffer = new ArrayBuffer(bytes.byteLength);
       new Uint8Array(buffer).set(bytes);
       objectUrl = URL.createObjectURL(new Blob([buffer], { type: mimeFromPath(image.mediaPath) }));
-      // 不 revoke：图片服务在渲染阶段才去取这个 url；但要登记到工作簿名下，随簿释放
       retainImageObjectUrl(workbookId, objectUrl);
 
       const builder = ctx.fWorksheet
@@ -1125,9 +1058,7 @@ function mimeFromPath(mediaPath: string): string {
   return 'application/octet-stream';
 }
 
-/* ==========================================================================
- * 工作簿级编排
- * ======================================================================== */
+/* ==== 工作簿级编排 ==== */
 
 /** 对整份工作簿逐表应用特性并汇总（单表失败不影响其它表） */
 export async function applyWorkbookFeatures(api: FUniver, parsed: ParsedWorkbook): Promise<ApplyFeaturesResult> {

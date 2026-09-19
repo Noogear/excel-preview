@@ -151,53 +151,21 @@ import './shell/shell.css';
 import './interaction/swap-animation.css';
 
 const CONTAINER_ID = 'univer-container';
-/**
- * "还没有打开任何文件"时的状态栏提示。
- *
- * 抽成常量是因为它现在有**两个**入口：启动引导、以及"关掉最后一个标签后摆回占位单元"——
- * 两处必须一字不差，否则用户会觉得工具状态变了样（一处说"拖入文件"，另一处还挂着上一份文件的统计）。
- */
+/** "还没有打开任何文件"时的状态栏提示；启动引导与"关掉最后一个标签摆回占位"两处共用，必须一字不差 */
 const IDLE_STATUS_TEXT = `拖入表格文件（${SUPPORTED_EXTENSIONS.join(' / ')}）或使用左侧示例开始`;
-/**
- * "算不算一次拖动"的位移阈值（px）。
- *
- * 取 8 而不是 4：鼠标/触控板按下时的**手抖**很容易超过 4px，于是"点一下"被当成"拖了一下"，
- * 松手落在工作区上就执行了落点动作（把单元格又收一份）。8px 是常见的"点击 vs 拖动"分界：
- * 点选、点工作区条目仍然算点击，真正的拖动也照样起得来。
- */
+/** "算不算一次拖动"的位移阈值（px）。取 8 而非 4：手抖常超 4px，会把"点一下"误判成拖放 */
 const MOVE_TOLERANCE_PX = 8;
-/**
- * 「选中后点工作区空白就能加入」的时间窗（毫秒）。
- *
- * 用户要求："选择模式下，选中单元格后在三秒内点击工作区空白区域时，会把单元格加到空白区域"。
- * 3 秒是"刚选完"的直觉窗口：超时后再点空白就不动手（避免用户只是随手点一下就莫名多出条目）。
- */
+/** 「选中后 3 秒内点工作区空白即加入」的时间窗（毫秒）；超时不动手，避免随手点击莫名多出条目 */
 const QUICK_ADD_WINDOW_MS = 3000;
-/**
- * 哪些交互模式支持这条捷径。
- *
- * 用户先要求"选择模式下…"，随后又要求"点击交换模式也把这个功能加上去"。
- * **拖拽模式刻意不参与**：那个模式的手势语言就是"按住拖"，在它下面点空白容易被理解成
- * "放下/取消"，少一个隐式动作更不容易误触（真要加入就切到选择模式，或直接把选区拖进工作区）。
- */
+/** 支持上述捷径的交互模式。拖拽模式刻意排除：它的手势语言是"按住拖"，点空白易被当成"放下/取消" */
 const QUICK_ADD_MODES: readonly InteractionMode[] = ['select', 'click-swap'];
-/**
- * 「活动单元画到画布上了没有」的**首帧等待窗口**（毫秒）。
- *
- * Univer 的绘制是异步的：导入/切标签刚结束那一瞬间画布往往还没提交首帧。
- * 立刻断言"画布宽度为 0 ⇒ 白屏"会误报（早期自检版本就犯过这个错），
- * 所以先逐帧轮询等一会儿；健康路径上第一次测量就通过，等于零开销。
- */
+/** 首帧等待窗口（毫秒）：Univer 绘制异步，刚导入/切标签就断言"画布宽度 0 ⇒ 白屏"会误报 */
 const RENDER_SETTLE_MS = 600;
 /** 重绑之后**再**给它多久把首帧画出来（超过就记 `render:rebind-failed`，用户按 F5 仍可恢复） */
 const RENDER_REBIND_MS = 1200;
 /** 抓滚动条滑块的容差（px）：滑块只有几像素宽，偏一点也要算"抓住了" */
 const SCROLLBAR_GRAB_TOLERANCE_PX = 6;
-/**
- * 滚动条交互条带厚度（px）：从视口右缘/下缘往里算。
- * 取 14：滚动条本身只有 ~6px 宽，留 8px 容差；再往里就会抢走"最后一列单元格"的拖拽。
- * 视口之外到画布边缘的那段"死区"（真实夹具里约 170px）**整段**都算滚动条，那才好抓。
- */
+/** 滚动条交互条带厚度（px）：从视口右缘/下缘往里算。取 14（滑块约 6px + 8px 容差），再往里会抢走最后一列拖拽 */
 const SCROLLBAR_STRIP_PX = 14;
 /** 启动时的示例工作簿 id（首个真实文件进来后就释放它，别白占一份工作簿内存） */
 const SAMPLE_WORKBOOK_ID = 'p0-workbook';
@@ -241,21 +209,12 @@ export function App() {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const sidebarRef = useRef<HTMLDivElement | null>(null);
 
-  /**
-   * 启动打点（加载速度）：`app:mounted` 表示"界面已经画出来了"（此时表格引擎还在引导）。
-   * 与入口的 `app:bundle-loaded` / `app:chunk-loaded`、引擎的 `univer:booted` 一起构成
-   * "骨架 → 应用 → 表格可用"三段，e2e 的启动预算就断言这三段。
-   */
+  /** 启动打点：`app:mounted` = 界面已画出（此时引擎还在引导）；e2e 的启动预算断言这三段 */
   useEffect(() => {
     performance.mark('app:mounted');
   }, []);
 
-  /**
-   * 探测本地转换桥（形态 × 本机 Excel）。
-   *
-   * 形态决定"要不要显示这些入口"，探测结果决定"点了能不能成"：本地版也可能没装 Excel。
-   * 静态形态直接返回"不可用 + 原因"，**不发请求**（避免控制台一串 404 噪音）。
-   */
+  /** 探测本地转换桥：形态决定是否显示入口，结果决定点了能否成功（本地版也可能没装 Excel）。静态形态不发请求 */
   useEffect(() => {
     let cancelled = false;
     void probeBridge().then((status) => {
@@ -276,13 +235,8 @@ export function App() {
   const lockRef = useRef<ContentOnlyLock | null>(null);
   const guardRef = useRef<ReadOnlyGuard | null>(null);
   /**
-   * 提醒框定位用的 `scene` / `skeleton` 缓存（按 unitId）。
-   *
-   * 为什么放在**组件级**（原来是引导 effect 里的局部对象）：释放工作簿的路径
-   * （`coldStoreTab` / `closeTab` / 拆示例簿）在 effect 外面，访问不到局部对象，
-   * 于是 `disposeUnit` 之后缓存仍指着**已释放的渲染单元**（scene + skeleton 及其可达的
-   * 行列几何/工作表数据），要等下一次命中测试才被换掉 —— 大表这一份对象不小。
-   * 提升到这里，释放单元时就能顺手清掉（见 `releaseUnitBookkeeping`）。
+   * 提醒框定位用的 scene/skeleton 缓存（按 unitId）。必须放组件级：释放工作簿的路径在引导 effect 之外，
+   * 否则 disposeUnit 后缓存仍指着已释放的渲染单元（大表这一份对象不小）；见 releaseUnitBookkeeping。
    */
   const renderCacheRef = useRef<null | { unitId: string; scene: unknown; skeleton: unknown }>(null);
   /** 分隔条拖动进行中的"摘监听"函数（卸载兜底用，见 startSidebarResize） */
@@ -292,29 +246,14 @@ export function App() {
   const pendingWorkspaceDragRef = useRef<{ snapshot: RangeSnapshot; x: number; y: number; started: boolean } | null>(null);
   /** 这一次按下落在哪个工作区条目上（没拖动就松手 = 点击，用于"点击互换"选边） */
   const pendingWorkspaceClickRef = useRef<RangeSnapshot | null>(null);
-  /**
-   * 最近一次"在表格里动手"的时间（点选单元格 / 在表格上按键）。
-   * 「选中后点工作区空白就能加入」这条捷径靠它判断"是不是刚选完"（见 `QUICK_ADD_WINDOW_MS`）。
-   */
+  /** 最近一次在表格里动手的时间（点选/按键）；「选中后点空白即加入」靠它判断是否刚选完 */
   const lastGridInteractionAtRef = useRef(0);
   /** 工作区面板上按下的位置：用于把"点一下空白"和"拖到面板里松手"区分开 */
   const workspacePressRef = useRef<{ x: number; y: number } | null>(null);
   /** 最近一次"快速加入"用的选区（同一次选区只加一次，避免连点收两遍） */
   const lastQuickAddRef = useRef<{ key: string; at: number } | null>(null);
-  /**
-   * **单元级操作的串行闸**（用户反馈："打开文件后页面是空白的，刷新后又会出现"）。
-   *
-   * 为什么会空白：有三条路径都会"新建/绑定工作簿并重挂表依赖"——
-   *   ① 打开文件（`handleFile` → `api.createWorkbook` + `attachSheetDeps`）；
-   *   ② 冷标签重建（`activateTab` → `buildTabUnit`，解析大文件要几秒）；
-   *   ③ 会话恢复（`restoreSession` 末尾也会 `activateTab`）。
-   * 以前它们可以**交错**执行：用户在"冷标签正在重建"或"启动恢复还没跑完"时去打开文件，
-   * 两个 `createWorkbook` 与两次 `attachSheetDeps` 就会互相穿插，活动单元与画布绑定的单元错位
-   * → 舞台一片空白；刷新后只有恢复这一条路径，于是又正常了。
-   *
-   * 现在把这三条路径排进同一条 Promise 链：**一次只跑一个**，后续的自动排在后面（用户动作不会丢，
-   * 只是等前面那一步做完）。闸门只圈"会动工作簿"的异步段，不圈 UI 状态更新。
-   */
+  /** **单元级操作的串行闸**：打开文件/冷标签重建/会话恢复都会新建并绑定工作簿，交错执行会让活动单元
+   * 与画布绑定的单元错位 → 舞台空白。排进同一条 Promise 链一次只跑一个，只圈"会动工作簿"的异步段 */
   const unitOpsRef = useRef<Promise<unknown>>(Promise.resolve());
   const runUnitOp = useCallback(<T,>(label: string, fn: () => Promise<T> | T): Promise<T> => {
     const next = unitOpsRef.current.then(
@@ -333,25 +272,15 @@ export function App() {
   const dropHandlerRef = useRef<(payload: DragPayload, target: DropTarget | null, pointer: { x: number; y: number }) => void>(() => {});
   const summaryRef = useRef<ImportSummary | null>(null);
   const featureResultRef = useRef<ApplyFeaturesResult | null>(null);
-  /** 保留解析结果（含原始 zip 字节），导出时用它做"外科式修补" */
-  /** 当前标签的导出数据源（瘦身后，不再是完整解析模型） */
+  /** 当前标签的导出数据源（瘦身后、含原始 zip 字节）；导出时用它做"外科式修补" */
   const parsedRef = useRef<ExportSource | null>(null);
   const importedFileNameRef = useRef<string>('workbook.xlsx');
 
-  /**
-   * 每个标签保留的是**瘦身后的**导出数据源，不是完整解析模型。
-   *
-   * 完整模型里上百万个 `ParsedCell` 是常驻内存的大头（实测 100 万格时浏览器堆 543 MB），
-   * 而导出只需要 `sheet.id` + "每行第一个样式 s" + 原始字节（导出时惰性解压）。
-   * 见 `src/exporter/slim-source.ts` 的说明。
-   */
+  /** 每个标签只留**瘦身后**的导出数据源：完整模型里上百万 ParsedCell 是内存大头（实测百万格堆 543 MB） */
   const tabsDataRef = useRef<Array<{ id: string; fileName: string; source: ExportSource | null; bytes: Uint8Array }>>([]);
   /**
-   * 标签的"实体化"记账（多标签内存控制的核心）。
-   *
-   * 用户要求"尽量复用资源、少占内存"：Univer 每个实体化工作簿 ≈ 数百 MB（百万格量级），
-   * 所以**打开的标签可以很多**，但**同时实体化的只保留最近用过的 K 个**（见 `src/shell/resident-tabs.ts`）。
-   * 被冷存的标签：字节与编辑仍在内存/会话里，切回时按需重建（重建走同一条导入管线）。
+   * 标签的"实体化"记账（多标签内存控制核心）：Univer 每个实体化工作簿 ≈ 数百 MB，
+   * 所以打开的标签可以很多，但同时实体化只保留最近用过的 K 个（见 `src/shell/resident-tabs.ts`）。
    */
   const tabRuntimeRef = useRef<TabRuntime[]>([]);
   const activeTabIdRef = useRef<string | null>(null);
@@ -385,17 +314,9 @@ export function App() {
   const lastSessionFingerprintRef = useRef<string>('');
   /** 供测试钩子调用（避免在钩子里直接引用后定义的 const） */
   const snapshotActiveEditsRef = useRef<() => void>(() => {});
-  /**
-   * 导入一个文件（由 handleFile 装配）。
-   *
-   * 用 ref 是因为**窗口级文件拖放**的监听要装在引导 effect 里（早于 handleFile 定义），
-   * 而拖进来的文件必须走与"打开表格"按钮完全相同的导入路径。
-   */
+  /** 导入文件（由 handleFile 装配）。用 ref：窗口级拖放监听装在引导 effect 里，早于 handleFile 定义 */
   const fileOpenerRef = useRef<(file: File) => void>(() => {});
-  /**
-   * 按**标签 id** 快照编辑；同样用 ref 暴露给前面的多标签逻辑
-   * （`coldStoreTab` 定义在 `snapshotEditsFor` 之前，直接引用会踩 TDZ）。
-   */
+  /** 按标签 id 快照编辑；用 ref 暴露（coldStoreTab 定义在 snapshotEditsFor 之前，直接引用会踩 TDZ） */
   const snapshotEditsForRef = useRef<(id: string) => number>(() => 0);
   /** 恢复过程中不要触发自动保存（否则会把"恢复了一半"的状态写回去） */
   const restoringRef = useRef(false);
@@ -440,10 +361,7 @@ export function App() {
   }, []);
   /** 「清空」的二次确认（不可逆批量操作，必须问一次） */
   const [wsClearConfirming, setWsClearConfirming] = useState(false);
-  /**
-   * 点击互换模式下"已经点过的另一方"（用于把工作区条目高亮成"待互换"）。
-   * 表格那一边由 Univer 的选区框体现，工作区这边必须自己给反馈，否则用户点了没感觉。
-   */
+  /** 点击互换模式下"已经点过的另一方"（把工作区条目高亮成待互换）；表格那边由选区框体现，这边必须自己反馈 */
   const [pendingSwapItemId, setPendingSwapItemId] = useState<string | null>(null);
   const [pendingSwapLabel, setPendingSwapLabel] = useState<string | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -459,10 +377,8 @@ export function App() {
   const bridgeStatusRef = useRef(bridge);
   bridgeStatusRef.current = bridge;
   /**
-   * 右键菜单：打开那一刻**快照**选区（菜单聚焦会让 Univer 认为焦点离开画布，之后不能再读）。
-   *
-   * `a1List` 是**全部**选区（Ctrl+点选可能有多块，已规范化：去重、被包含的小块丢掉）；
-   * `a1` 是主区域，供"与工作区互换/粘贴"这类只支持单块的操作使用。
+   * 右键菜单打开那一刻**快照**选区（菜单聚焦后画布选区就不可读）。
+   * `a1List` 是全部选区（已规范化去重）；`a1` 是主区域，供只支持单块的操作使用。
    */
   interface MenuSelectionSnapshot {
     a1: string;
@@ -479,49 +395,24 @@ export function App() {
   } | null>(null);
   const [canUndo, setCanUndo] = useState(false);
   const [canRedo, setCanRedo] = useState(false);
-  // ---- 历史记录（⑤）：我们自己记账，跳步靠连续撤销/重做 ----
+  // ---- 历史记录：我们自己记账，跳步靠连续撤销/重做 ----
   const [historyEntries, setHistoryEntries] = useState<HistoryEntry[]>([]);
   const [historyIndex, setHistoryIndex] = useState(0);
-  /**
-   * 账本的**同步**副本。
-   *
-   * `setState` 是异步的：用户"加入工作区"后立刻按 Ctrl+Z 时，`historyEntries` 可能还没更新，
-   * 若撤销逻辑读 state 就会错位（实测：条目数没变，撤销跑到表格栈上去了）。
-   * 所以账本以这个 ref 为准，state 只负责渲染。
-   */
+  /** 账本的**同步**副本：setState 异步，加入工作区后立刻 Ctrl+Z 时读 state 会错位；以 ref 为准，state 只渲染 */
   const entriesRef = useRef<HistoryEntry[]>([]);
   const [undoRedoCounts, setUndoRedoCounts] = useState({ undos: 0, redos: 0 });
   const historyIndexRef = useRef(0);
   const prevUndosRef = useRef(0);
   const pendingHistoryLabelRef = useRef<{ label: string; kind: HistoryKind; at: number } | null>(null);
-  /**
-   * 正在进行中的**表格动作**（互换/移动/写回/清空…），用于和 Univer 的记账对齐。
-   *
-   * 背景（用户反馈"工作区的操作撤不掉"的根因之一）：
-   * 我们自己执行的表格命令会**同时**被两处记账——Univer 的 `undos` 计数（订阅里自动补一条
-   * "编辑内容"）与我们的 `pushHistory`。两条叠在一起，账本里就多出一条"幽灵步骤"，
-   * 撤销时白白多按一次 Ctrl+Z（实测：工作区那一步撤不到，条目数还是 19）。
-   * 所以动作开始时记下"已经自动入账了几条"，动作结束时 `pushHistory` 把**这次动作期间**
-   * 自动补出来的那几条收敛成一条（用我们的措辞），保证"一次动作 = 一条历史"。
-   */
+  /** 正在进行中的表格动作。我们执行的表格命令会同时被 Univer 的 undos 订阅和我们自己的 pushHistory
+   * 记账，账本多出"幽灵步骤"（撤销要多按一次）；动作开始时记下已自动入账条数，结束时收敛成一条 */
   const sheetActionRef = useRef<{ label: string; kind: HistoryKind; startAuto: number } | null>(null);
   /** 订阅自动补出来的表格历史 id（按入账顺序；`pushHistory` 认领后移出） */
   const autoSheetEntriesRef = useRef<string[]>([]);
-  /**
-   * 我们自己的 `api.undo()/redo()` 引起的 `undos` 变化不予记账（见订阅里的说明）。
-   * 命令执行期间同步置位、执行后清位，所以不会有"漏抑制"的窗口。
-   */
+  /** 我们自己的 api.undo()/redo() 引起的 undos 变化不予记账；命令执行期间同步置位，无漏抑制窗口 */
   const suppressAutoEntriesRef = useRef(0);
-  /**
-   * **长时间窗口**的抑制开关：置位期间 Univer 的 undos 增长一律不入账（只更新计数）。
-   *
-   * 为什么还要这一层（`suppressAutoEntriesRef` 是"一次性"的，只够盖住一次同步命令）：
-   * **打开文件时应用特性**（条件格式/数据验证/超链接/批注/图片）会连续执行一串 Univer 命令，
-   * 订阅会分多次看到 undos 增长，于是账本里凭空多出几条"编辑内容"幽灵条目 —— 用户按 Ctrl+Z
-   * 撤的是它们（看上去"什么都没撤掉"，实测 `fixture-extras.xlsx` 就是这样多了 1 条）。
-   * 打开文件/重建标签属于"装载"，不该在用户的撤销栈里留痕；这段时间整个窗口关掉记账。
-   * 异步过程用**布尔窗口**（置位 → 应用特性 → 清位），不是计数器。
-   */
+  /** **长时间窗口**的抑制开关（上一个是"一次性"的）：打开文件时应用特性会连发一串命令，订阅分多次
+   * 看到 undos 增长，账本凭空多出幽灵条目、用户按 Ctrl+Z 看着"什么都没撤掉"。用布尔窗口不用计数器 */
   const pauseAutoEntriesRef = useRef(false);
   const undoRedoCountsRef = useRef({ undos: 0, redos: 0 });
   /** 最近一次历史入账时间（用于"打字产生的编辑"去重） */
@@ -538,12 +429,7 @@ export function App() {
   }, []);
 
   // ---------------------------------------------------------------- 小工具
-  /**
-   * 提示条（toast）：3.2 秒后自动消失。
-   *
-   * 定时器句柄要**记下来并在卸载时清掉**（审计提的）：虽然最多同时 3 条、也不抓着大对象，
-   * 但"卸载后还有定时器往回 setState"是不该留的尾巴（HMR 重挂时会对着旧实例调用）。
-   */
+  /** 提示条：3.2 秒后自动消失。定时器句柄要记下并在卸载时清掉（HMR 重挂会对着旧实例 setState） */
   const toastTimersRef = useRef<Set<number>>(new Set());
   const toast = useCallback((text: string, kind: Toast['kind'] = 'info') => {
     const id = Date.now() + Math.random();
@@ -555,7 +441,7 @@ export function App() {
     toastTimersRef.current.add(timer);
   }, []);
 
-  // 卸载时清掉所有待触发的提示定时器（与上面成对）
+  // 与上面成对：卸载时清掉待触发的提示定时器
   useEffect(
     () => () => {
       for (const timer of toastTimersRef.current) window.clearTimeout(timer);
@@ -567,14 +453,8 @@ export function App() {
   const getSheet = useCallback((): FWorksheet | null => apiRef.current?.getActiveWorkbook()?.getActiveSheet() ?? null, []);
 
   /**
-   * 读当前工作表的**全部**选区，规范化成 A1 列表。
-   *
-   * 用户要求："请实现不连续多区域（Ctrl+点选）"。Univer 的选区模型本来就支持多块
-   * （`FWorksheet.getSelection().getActiveRangeList()`），以前我们所有地方都只读
-   * `getActiveRange()` 这一块，于是"多选了但功能区只认第一块"。
-   *
-   * 规范化（`normalizeRanges`）会丢掉被包含的小块并去重，避免"框了一大片又点里面一格"
-   * 造成重复条目；读不到时退回单块，再读不到给空数组（不抛异常）。
+   * 读当前工作表的**全部**选区（支持 Ctrl+点选的多块）并规范化成 A1 列表。
+   * `normalizeRanges` 会去重并丢掉被包含的小块；读不到时退回单块，再读不到给空数组（不抛异常）。
    */
   const readSelectionA1List = useCallback((): string[] => {
     try {
@@ -602,16 +482,8 @@ export function App() {
   }, [readSelectionA1List]);
 
   // ---------------------------------------------------------------- 状态栏选区
-  /**
-   * 状态栏那个"选区 …"必须**跟着真实选区走**，而且要多块一起报。
-   *
-   * 实测问题（早先）：拖选一整片（如 B4:F11）之后状态栏仍显示"选区 A1"——因为以前只在
-   * 切表/导入时刷新一次。用户因此看不到自己实际选了什么，配合合并单元格的自动扩展，
-   * 就会觉得"剪切的内容不是自己选的那部分"。
-   *
-   * 现在读的是**全部**选区（Ctrl+点选会有多块，见 `readSelectionA1List`），
-   * 文案由 `summarizeSelection` 生成：单块 `B2:D5`，多块 `B2 + D4（2 块 / 2 格）`。
-   */
+  /** 状态栏的"选区 …"必须跟着真实选区走、多块一起报。文案由 `summarizeSelection` 生成：
+   * 单块 `B2:D5`，多块 `B2 + D4（2 块 / 2 格）` */
   useEffect(() => {
     const timer = window.setInterval(() => {
       if (document.hidden) return;
@@ -624,12 +496,8 @@ export function App() {
   }, [readSelectionA1List]);
 
   /** 每次活动工作表变化（首次引导 / 导入 / 切换标签）都要重装格式锁 */
-  /**
-   * 关掉当前工作簿选区右下角那个"填充柄"小方块（见 `src/univer/fill-handle.ts`）。
-   *
-   * 每个渲染单元只打一次开关（日志 `ui:fill-handle-off`），但**每次** `attachSheetDeps()`
-   * 都调一次：控件是按"选区"新建的（切工作表、多选都会新建），闸门要在每次装配时重新扣上。
-   */
+  /** 关掉选区右下角的"填充柄"（见 `src/univer/fill-handle.ts`）：它是自动填充入口，而本产品只允许
+   * 逐格改内容；拖它还会被我们的内容拖拽接管、悄悄互换两格内容。控件按选区新建，每次装配都要重扣 */
   const fillHandleLoggedRef = useRef<Set<string>>(new Set());
   const disableFillHandleForCurrentUnit = useCallback((): boolean => {
     try {
@@ -660,12 +528,7 @@ export function App() {
     ensureSwapCommandRegistered(sheet);
     probePermissionApi(sheet);
     refreshSheetMeta();
-    /**
-     * 去掉选区右下角那个"填充柄"小方块：它是 Univer 给**自动填充**用的入口，
-     * 而自动填充在本产品里被闸门永久拒绝（只允许逐格改内容），拖它还会被我们自己的
-     * 内容拖拽接管、悄悄把两格内容互换 —— 属于"看着像填充、实际在换内容"的误导入口。
-     * 详见 `src/univer/fill-handle.ts`。
-     */
+    // 同上：填充柄在"只改内容"的约束下是误导入口
     disableFillHandleForCurrentUnit();
     log('app:lock-attached', { sheet: sheet.getSheetName() });
   }, [getSheet, refreshSheetMeta]);
@@ -684,33 +547,18 @@ export function App() {
     (next: RangeSnapshot[] | ((prev: RangeSnapshot[]) => RangeSnapshot[]), label: string, kind: HistoryKind) => void
   >(() => {});
 // ---------------------------------------------------------------- 落点处理
-  /**
-   * 把 `snapshotStoreRef`（id → 快照）与**当前的 items 列表**对齐。
-   *
-   * 为什么必须收口（审计查出的真实泄漏 + 一处功能缺陷）：
-   *  - **泄漏**：以前只有 `commitWorkspace` 里按 `before` 删，而"加入工作区 → Ctrl+Z"撤销之后，
-   *    那些条目已经不在 items 里、也就再不会出现在任何一次 `before` 中 → 它们的快照**永远删不掉**。
-   *    快照 id 是 `snap-${Date.now()}-${seq}`（永不复用），所以每来回一次就永久多留一条。
-   *  - **功能缺陷**：反向也不一致 —— 撤销"移除条目"时 items 回来了、store 里却没有，
-   *    读 store 的路径（拖拽写回、粘贴）会取到 `undefined`，表现成"工作区条目不存在"。
-   *  现在统一按"当前列表"对齐（多删少补），三条写 items 的路径共用它。
-   */
+  /** 把 `snapshotStoreRef`（id → 快照）与当前 items 列表对齐（多删少补）。不按当前列表对齐时，
+   * 撤销后消失的条目快照永远删不掉（id 永不复用）；撤销"移除条目"又会留下 store 里没有的条目，
+   * 读 store 的路径（拖拽写回、粘贴）会取到 undefined */
   const syncSnapshotStore = useCallback((next: RangeSnapshot[]) => {
     const alive = new Set(next.map((item) => item.id));
     for (const id of [...snapshotStoreRef.current.keys()]) if (!alive.has(id)) snapshotStoreRef.current.delete(id);
     for (const item of next) if (!snapshotStoreRef.current.has(item.id)) snapshotStoreRef.current.set(item.id, item);
   }, []);
 
-  /**
-   * 工作区状态的**唯一提交入口**（所有增删改都走它）。
-   *
-   * 为什么必须收口：用户反馈"无法撤回对工作区的操作（撤回时工作区未改变，或工作区的操作未被记录）"。
-   * 工作区的增删只改我们自己的 React state，Univer 的撤销栈完全不知情，
-   * 所以以前 Ctrl+Z 只会去撤表格内容。现在每次改动都会：
-   *  ① 记一条 `scope: 'workspace'` 的历史（带 before/after 快照）；
-   *  ② 同步 `itemsStateRef` 与 `snapshotStoreRef`（拖拽写回、测试钩子读的是它们）；
-   *  ③ 让撤销/重做按时间顺序在"表格动作"与"工作区动作"之间切换（见 stepBack/stepForward）。
-   */
+  /** 工作区状态的**唯一提交入口**：工作区增删只改我们的 React state，Univer 撤销栈不知情，不收口
+   * Ctrl+Z 就只会撤表格内容。每次改动记一条带 before/after 快照的 workspace 历史，并同步
+   * itemsStateRef 与 snapshotStoreRef，让撤销/重做按时间顺序在两类动作间切换 */
   const commitWorkspace = useCallback(
     (next: RangeSnapshot[] | ((prev: RangeSnapshot[]) => RangeSnapshot[]), label: string, kind: HistoryKind) => {
       const before = itemsStateRef.current;
@@ -731,13 +579,8 @@ export function App() {
   commitWorkspaceRef.current = commitWorkspace;
 
   /**
-   * 批量放入工作区（新条目排在最前，保持区域内"行优先"的顺序，方便逐个分配）。
-   *
-   * **入口级去重**（第二道防线）：按 `id` 剔除工作区里已有的条目。
-   *   · 为什么需要：用户实测"工作区里把条目拖到空白处会自我复制" —— 根因是落点判断没看拖拽来源
-   *     （已在 `dropHandlerRef` 里修掉），这里再兜一层：**同一个快照只能在工作区里存在一份**。
-   *   · 为什么不会挡住正常重复：从表格里再拖一次同一格，会由 `extractCellItems` **重新生成新 id**，
-   *     所以"同内容不同来源快照"照旧可以并存；被挡住的只有"把同一个快照又收一遍"。
+   * 批量放入工作区（新条目排最前，保持区域内行优先顺序）。
+   * 入口级去重（第二道防线）：同一个快照 id 只能存在一份；从表格重拖会生成新 id，不受影响。
    */
   const addWorkspaceItems = useCallback(
     (incoming: RangeSnapshot[], label?: string): number => {
@@ -760,17 +603,8 @@ export function App() {
     [commitWorkspace],
   );
 
-  /**
-   * 放入工作区的**唯一实现**（拖拽 / 右键复制剪切 / 「+」导入 / 一键全搬都走它，可一次多块）。
-   *
-   * 用户要求：工作区里存的是**一个个独立单元格**（保留各自在表里的尺寸），
-   * 而且**绝对跳过空内容单元格**——无论复制、剪切、多选还是别的操作都一样。
-   * 所以这里不直接收下"一整片区域"，而是把每一块都拆成 1×1 条目（空格直接丢掉）。
-   *
-   * `a1List` 支持多块（Ctrl+点选）：**一次提交**（一条历史、一次渲染），
-   * 统计与日志也汇总成一条 —— 逐块调用会产生 N 条历史、N 个 toast，用户会以为做了 N 次操作。
-   * 返回是否真的放进了东西（false = 全空或出错，调用方据此决定要不要继续做"剪切"这类后续动作）。
-   */
+  /** 放入工作区的**唯一实现**（所有入口共用）：工作区存的是一个个独立单元格、空内容一律跳过，
+   * 所以把每块拆成 1×1 条目。多块一次提交（一条历史、一次渲染），返回值表示是否真放进了东西 */
   const addWorkspaceFromRanges = useCallback(
     (a1List: string[], pointer?: { x: number; y: number }): { ok: boolean; items: RangeSnapshot[]; skipped: number; truncated: number } => {
       const sheet = getSheet();
@@ -797,7 +631,7 @@ export function App() {
 
       const added = addWorkspaceItems(collected);
       if (added === 0) {
-        // 同一个快照又被收了一遍（例如工作区内部拖动被误当成"从表格拖进来"）：什么都不能改
+        // 同一个快照又被收了一遍（例如工作区内部拖动被误当成"从表格拖进来"）
         toast('这些内容已经在工作区里了', 'warn');
         log('workspace:skip-duplicate', { a1: scope, items: collected.length });
         return { ok: false, items: collected, skipped, truncated };
@@ -807,7 +641,7 @@ export function App() {
       if (skipped > 0) parts.push(`跳过 ${skipped} 个空内容单元格`);
       if (truncated > 0) parts.push(`超出上限未放入 ${truncated} 个`);
       toast(parts.join(' · '));
-      // 日志口径保持与旧版一致（e2e 与用户排错都依赖它）：跳过数、截断数、来源范围
+      // 日志字段是 e2e 与用户排错依赖的口径，勿改
       if (skipped > 0) log('workspace:skip-empty', { skipped, a1: scope, blocks: a1List.length });
       if (truncated > 0) log('workspace:truncated', { truncated, a1: scope, max: MAX_WORKSPACE_ITEMS_PER_ACTION });
 
@@ -865,19 +699,11 @@ export function App() {
   }, []);
 
   /**
-   * **快速加入**：选择模式下，刚在表格里选过单元格（{@link QUICK_ADD_WINDOW_MS} 内）时，
-   * 点工作区面板的**空白处**就把当前选区收进工作区。
-   *
-   * 用户要求："选择模式下，选中单元格后在三秒内点击工作区空白区域时，会把单元格加到空白区域"。
-   *
-   * 判定上刻意收得很紧（宁可不动手，也不要误加）：
-   *  ① 必须是**点击**（按下与松开位移 < {@link MOVE_TOLERANCE_PX}）——拖到面板里松手不算；
-   *  ② 落点必须是**真正的空白**（不在条目、按钮、输入框、下拉、标签上）；
-   *  ③ 只在**选择模式**生效：拖拽/点击互换模式下点击空白不做任何事，免得和那两种模式的手势打架；
-   *  ④ 必须是"刚在表格里动过手"（3 秒内）——超时后点空白只是点空白；
-   *  ⑤ **同一次选区只加一次**：连点两下不会收两遍（重复点击记 `workspace:quick-add-duplicate`）。
-   *
-   * 落地仍然走唯一入口 `addWorkspaceFromRanges`：逐格拆分、跳过空内容、按 id 去重、可撤销。
+   * **快速加入**：选择模式下，刚在表格里选过（`QUICK_ADD_WINDOW_MS` 内）时，点工作区面板**空白处**
+   * 就把当前选区收进工作区。判定刻意收紧（宁可不动手也不误加）：必须是点击（位移 < `MOVE_TOLERANCE_PX`）、
+   * 落点必须是真的空白（不在条目/按钮/输入框/下拉/标签上）、只在支持的交互模式生效、必须在"刚在表格里
+   * 动过手"的窗口内、同一次选区只加一次。
+   * 落地走唯一入口 `addWorkspaceFromRanges`：逐格拆分、跳过空内容、按 id 去重、可撤销。
    */
   const handleWorkspaceBlankClick = useCallback(
     (event: ReactMouseEvent<HTMLDivElement>) => {
@@ -935,14 +761,8 @@ export function App() {
     const sheet = getSheet();
     if (!sheet) return;
 
-    /**
-     * 1) 落到侧边栏 → 暂存为工作区条目。
-     *
-     * **必须区分"从哪儿拖来的"**（用户实测反馈："我在工作区拖动单元格到工作区空白地方，会自我复制"）：
-     * 以前这里不看 `payload.kind`，于是**工作区条目拖到工作区自己身上**（挪几像素、松手在面板空白处）
-     * 会被当成"从表格拖进来"，把同一个快照再收一遍 —— 新 id、同样来源，看起来就是"自己复制了一份"。
-     * 现在：条目在工作区里拖动 = 什么都不做（要写回请拖到表格里）。
-     */
+    /** 1) 落到侧边栏 → 暂存为工作区条目。**必须区分拖拽来源**：不看 `payload.kind` 的话，工作区条目
+     * 拖到面板空白处会被当成"从表格拖进来"，同一个快照再收一遍（新 id、同来源）＝自我复制 */
     if (isInsideSidebar(pointer)) {
       if (payload.kind === 'workspace-item') {
         toast('这个单元格已经在工作区里了；拖到表格里才会写回去');
@@ -950,16 +770,10 @@ export function App() {
         return;
       }
       const staged = addWorkspaceItem(payload.snapshot, pointer);
-      // 用户设置：拖到工作区后是否**保留**表格里的内容（false = 剪切语义）
+      // 用户设置：拖入后是否保留表格内容（false = 剪切语义）
       if (!settingsRef.current.keepSourceOnDrop) {
         const src = payload.snapshot.source;
-        /**
-         * 只有**真的放进去了**才动源内容。
-         *
-         * 同类的"误操作"防线（用户要求"检查是否存在类似其他问题"）：选中区域全是空内容时，
-         * 底层会整块跳过、一条都放不进工作区 —— 那种情况下若还去清空源内容，用户看到的就是
-         * "东西没进来，格子却空了"。所以按返回值判断，没放进去就什么都不做。
-         */
+        /** 只有真的放进去了才动源内容：全空选区会被整块跳过，此时清空源会是"东西没进来、格子却空了" */
         if (!staged.ok) {
           log('workspace:cut-skipped', { a1: src.a1, reason: 'nothing-staged' });
           return;
@@ -996,11 +810,8 @@ export function App() {
     // 3) 工作区条目拖回表格 → 只写内容，保留目标格式
     if (payload.kind === 'workspace-item') {
       /**
-       * 这里曾经是 `pushHistory(label, 'workspace')`：账本记了一条**工作区**条目，
-       * 但工作区快照只有 `commitWorkspace` 会建 → 撤销时 `stepBack` 找不到快照、直接返回 false，
-       * Ctrl+Z 从此**永久失灵**（用户反馈"工作区的操作撤不掉"的另一半根因）。
-       * 写回表格本质是**表格侧**的一次内容编辑，必须走表格通道：
-       * `beginSheetAction` 预置措辞 → 命令 → `pushHistory(..., 'sheet')` 认领 Univer 的那一步。
+       * 写回表格是表格侧的内容编辑，必须走表格通道（beginSheetAction 预置措辞 → 命令 →
+       * pushHistory 认领 Univer 那一步）；记成 'workspace' 会让 stepBack 找不到快照、Ctrl+Z 永久失灵。
        */
       const label = `写入工作区条目 ${snapshot.label}`;
       beginSheetAction(label, 'edit');
@@ -1008,7 +819,7 @@ export function App() {
       pushHistory(label, 'edit');
       toast(`已写入 ${snapshot.label} → ${targetA1}`);
       log('app:workspace-paste', { from: snapshot.label, to: targetA1 });
-      // 用户设置：写回后是否把该条目从工作区移除
+      // 用户设置：写回后是否从工作区移除该条目
       if (settingsRef.current.removeItemAfterPaste) {
         removeItem(snapshot.id);
         log('workspace:remove-after-paste', { id: snapshot.id, label: snapshot.label });
@@ -1060,22 +871,10 @@ export function App() {
   useEffect(() => {
     setReducedMotion(window.matchMedia('(prefers-reduced-motion: reduce)').matches);
 
-    /**
-     * **热更新重启**（Vite HMR / React Fast Refresh）的识别与处理。
-     *
-     * 用户实测反馈："每次你更新代码后，标签页都会出现一个名字相同的'灵魂'标签页。"
-     * 复现与根因（实测日志：`session:restore-start {tabs:1}` → `session:tabs-registered {tabs:2}`、
-     * 控制台一串 React "two children with the same key"）：
-     * Fast Refresh 会把本 effect **重跑一遍**，而 `refs`/`state` 是**保留**的；
-     * 但旧 Univer 实例已经在 cleanup 里 `dispose()` 掉了。于是：
-     *  ① `tabsDataRef` 里还记着刚才那些标签，而新实例里根本没有对应的 unit
-     *     （点它会报 `no document with unitId …`）——这就是"灵魂标签"：看得见、点不动；
-     *  ② 启动恢复照常把会话里的标签**再追加一次**（同 id），标签栏于是出现两个同名标签。
-     *
-     * 处理：识别出"重跑"就把所有标签标成**未实体化**（切回时按字节重建，与冷标签同一条路径），
-     * 并让接下来的恢复只**补充**会话里缺失的标签（见恢复循环里的按 id 去重）。
-     * 这样既不会多出标签，当前的标签内容/编辑也还在（不必整页刷新）。
-     */
+    /** **热更新重启**（HMR / React Fast Refresh）的识别与处理：Fast Refresh 会重跑本 effect，而
+     * refs/state 保留、旧实例已在 cleanup 里 dispose → tabsDataRef 里还记着标签但没有对应 unit
+     * （"灵魂标签"：看得见点不动），且启动恢复会把同 id 标签再追加一次。
+     * 处理：把所有标签标成**未实体化**（切回按字节重建），恢复只按 id 补充缺失标签 */
     const hotReboot = tabsDataRef.current.length > 0 || tabRuntimeRef.current.length > 0;
     if (hotReboot) {
       tabRuntimeRef.current = tabRuntimeRef.current.map((entry) => ({ ...entry, built: false }));
@@ -1086,11 +885,8 @@ export function App() {
     const cleanups: Array<() => void> = [];
 
     /**
-     * 填充柄的**类级**关闸：必须在第一个工作簿（示例表）创建**之前**装好。
-     *
-     * 为什么还要这一层：启动是 `loadWorkbook(示例) → attachSheetDeps()` 连着做的，
-     * 那一刻渲染单元（以及它的选区渲染服务）还没建出来，"按单元关"会落空 ——
-     * 用户第一眼看到的示例表右下角就仍然画着那个小方块（用户实测反馈 + 截图确认）。
+     * 填充柄的**类级**关闸，必须在第一个工作簿（示例表）创建之前装好：启动时 loadWorkbook →
+     * attachSheetDeps 连着做，那一刻渲染单元还没建出来，"按单元关"会落空，示例表右下角仍会画着小方块。
      */
     log(installFillHandleOff() ? 'ui:fill-handle-off-prototype' : 'ui:fill-handle-off-prototype-missing');
 
@@ -1119,31 +915,19 @@ export function App() {
             setUndoRedoCounts({ undos, redos });
             undoRedoCountsRef.current = { undos, redos };
 
-            /**
-             * 历史记账：undos 增加 = 表格侧产生新的一步（打字等"不是我们发起"的编辑靠这里入账）。
-             *
-             * 注意两点（用户反馈"工作区操作没被记录/撤不掉"之后改的）：
-             *  1. **不再用 undos 回写 historyIndex**：账本里还有工作区动作，条目数与 Univer 的
-             *     撤销栈步数不再一一对应；回写会让两者错位。撤销/重做一律走
-             *     `stepBack/stepForward`（按账本顺序在表格与工作区之间切换）。
-             *  2. 由我们主动执行的那次 undo（stepBack → api.undo()）会看到 undos 减少，
-             *     这里什么都不做（索引已经由 stepBack 自己维护）。
-             */
+            /** 历史记账：undos 增加 = 表格侧新的一步（打字等非我们发起的编辑靠这里入账）。不能用 undos
+             * 回写 historyIndex（账本里还有工作区动作，条目数与 Univer 步数不再一一对应），撤销/重做
+             * 一律走 stepBack/stepForward */
             const previous = prevUndosRef.current;
             if (undos > previous) {
-              /**
-               * 装载窗口（打开文件 / 重建标签时应用特性）内的增长不属于用户操作，不入账。
-               * 只更新计数：`prevUndosRef` 跟着走，窗口关闭后新的一步仍然能被正确识别。
-               */
+              /** 装载窗口内的增长不属于用户操作，不入账；只更新计数，窗口关闭后新步骤仍能识别 */
               if (pauseAutoEntriesRef.current) {
                 prevUndosRef.current = undos;
                 return;
               }
               /**
-               * 我们自己发起的撤销/重做（stepBack/stepForward → `api.undo()/redo()`）同样会让
-               * `undos` 计数变化：**重做**就是 +1。若不跳过，账本里刚被重做出来的那一步会被
-               * 一条自动入账的"编辑内容"顶掉（实测：重做"互换 B4 ⇄ D6"后标签变成了"编辑内容"）。
-               * 命令执行时状态是同步发出的，所以"置 1 → 命令 → 清 0"这段窗口足够精确。
+               * 我们自己发起的撤销/重做也会让 undos 变化（重做即 +1）；不跳过的话，刚重做出来的那一步
+               * 会被自动入账的"编辑内容"顶掉。状态同步发出，"置 1 → 命令 → 清 0"窗口足够精确。
                */
               if (suppressAutoEntriesRef.current > 0) {
                 suppressAutoEntriesRef.current = 0;
@@ -1151,10 +935,7 @@ export function App() {
                 return;
               }
               const added = undos - previous;
-              /**
-               * 标签只认**刚打上**的那一个：`beginSheetAction` 会预置标签（我们的表格动作），
-               * 万一那次动作其实没产生撤销步骤（内容本来就一样），标签就不能串到用户的下一次编辑上。
-               */
+              /** 标签只认刚打上的那一个（超过 2 秒的预置标签不能串到用户的下一次编辑上） */
               const marked = pendingHistoryLabelRef.current;
               const pending =
                 marked && Date.now() - marked.at < 2000
@@ -1204,11 +985,8 @@ export function App() {
       if (!container) throw new Error('预览容器不存在');
 
       /**
-       * 像素 → 单元格（自建命中测试）。
-       *
-       * 为什么不用 Univer 的 `CellPointerMove`：非选择模式下我们会屏蔽 pointermove（见下面的指针接线），
-       * 那个事件也就不会再派发；而渲染服务那个 `getCellWithCoordByOffset` 后来也确认不适用，
-       * 最终走的是下面自建的换算（见 `hitTestCell`）。这里不再留"渲染服务缓存"那个从没用过的 ref。
+       * 像素 → 单元格（自建命中测试）。不用 Univer 的 `CellPointerMove`：非选择模式下我们会屏蔽
+       * pointermove，它不会再派发；渲染服务的 `getCellWithCoordByOffset` 也不适用。
        */
       /** 提醒框定位用的 scene/skeleton 缓存：声明在组件级（释放单元时要清），见那里的注释 */
       /** 互换后"补清选区"的 rAF 句柄 */
@@ -1233,12 +1011,9 @@ export function App() {
         if (x < rect.left || x > rect.right || y < rect.top || y > rect.bottom) return null;
 
         /**
-         * **自建换算**（不再用渲染服务的 `getCellWithCoordByOffset`）。
-         *
-         * 上游那条链路里的滚动换算在 scale=1 时会把滚动量消掉，实测后果是：表格滚过之后
-         * 拖动落点解析成"没滚动时"的格子（指针在 S74、app 认成 D13，用户反馈"起点和落点严重偏移"）。
-         * 我们自己算：画布像素 → 内容坐标（`css / scale + scroll`）→ 在行列累计偏移里二分查找。
-         * 与提醒框的正向换算严格互逆（正向见 `src/interaction/swap-flash.ts` 的"实测校正"）。
+         * **自建换算**：上游的 `getCellWithCoordByOffset` 在 scale=1 时会把滚动量消掉，滚过之后落点
+         * 会解析成"没滚动时"的格子。这里自己算：css / scale + scroll，再在行列累计偏移里二分查找；
+         * 与提醒框的正向换算严格互逆（正向见 `src/interaction/swap-flash.ts`）。
          */
         try {
           const unitId = apiRef.current?.getActiveWorkbook()?.getId();
@@ -1306,26 +1081,13 @@ export function App() {
       clearSelectionRef.current = clearCellSelection;
 
       /**
-       * 再清两次选区（接下来两帧各一次）。
-       *
-       * 为什么需要：Univer 的选区写入是**异步命令**，`pointerup` 之后紧跟的 `click`
-       * 有时会把选区又写回来——只在当帧清一次会漏，用户看到的就是"互换后还选中着"。
-       * 只清两帧，之后就交给用户的正常操作，不会跟用户抢选区。
-       */
-      /**
-       * 再清几次选区（三帧 + 一次延时兜底）。
-       *
-       * 为什么需要：Univer 的选区写入是**异步命令**，`pointerup` 之后紧跟的 `click`、以及内部排队，
-       * 都可能把选区又写回来——只在当帧清一次会漏，用户看到的就是"互换后还选中着最开始那一格"。
-       *
-       * **但要分清是谁的选区**：只收拾"这次互换带出来的"选区（源格/目标格）。
-       * 否则会出真事故：互换后用户（或程序）在 160ms 内选了一片新区域，我们若无条件清一次，
-       * 就把用户刚选的东西抹掉了（实测踩过：工作区用例里程序化选区被这一下清掉，条目只剩 A1）。
-       * 用户一按下指针也会立即取消所有待执行的清理，绝不跟用户抢选区。
+       * 再清几次选区（三帧 + 一次延时兜底）：选区写入是异步命令，只清当帧会漏（用户看到"互换后还
+       * 选中着最开始那一格"）。但要分清是谁的选区：只收拾这次互换带出来的源格/目标格——无条件清会
+       * 抹掉用户在 160ms 内新选的区域；用户一按下指针就立刻收手。
        */
       const clearSelectionSoon = (cells: string[] = []): void => {
-        // 累积"这次收尾涉及哪几格"：一次拖拽收尾可能分两步调用（互换内部清一次、松手再清一次），
-        // 后一次不能把前一次的所有权覆盖掉，否则 Univer 晚到的选区写入就没人收拾了（实测踩过）。
+        // 累积"这次收尾涉及哪几格"：一次拖拽收尾可能分两步调用，后一次不能覆盖前一次的所有权
+        // （否则 Univer 晚到的选区写入就没人收拾了，实测踩过）
         cells.filter(Boolean).forEach((a1) => pendingClearOwnedRef.current.add(a1));
         cancelSelectionClears(false);
         // 第一下**立即清**：这次手势（互换/搬运）刚结束，不该留选中
@@ -1334,8 +1096,7 @@ export function App() {
         let framesLeft = 3;
         const step = (): void => {
           selectionClearRafRef.current = null;
-          // 后续几次只为收拾"Univer 异步把互换那两格又写回选中"的情况：
-          // 选区若已变成别处（用户或程序自己选的），立刻收手，绝不跟用户抢。
+          // 后续几次只为收拾"Univer 异步把互换那两格又写回选中"；选区若已变成别处就立刻收手
           if (owned.size === 0 || !selectionBelongsToGesture(owned)) {
             owned.clear();
             return;
@@ -1380,12 +1141,9 @@ export function App() {
       };
 
       /**
-       * 单元格 → **视口**矩形（黄色提醒框用）。
-       *
-       * 坐标链路（公式取自上游 `getTransformOffsetX` 的反解，见 `src/interaction/swap-flash.ts`）：
-       *   skeleton.getCellWithCoordByIndex(row,col) 给内容坐标（含行/列表头偏移）
-       *   → 用 scene 的滚动/缩放换算到画布内 CSS 像素 → 加上画布在视口里的位置。
-       * 渲染实例与服务都按 unitId 缓存（每帧调用，不能反复查 DI）。
+       * 单元格 → **视口**矩形（黄色提醒框用）：`getCellWithCoordByIndex` 给内容坐标 → 用 scene 的
+       * 滚动/缩放换算到画布 CSS 像素 → 加上画布位置（见 `src/interaction/swap-flash.ts`）。
+       * 渲染实例与服务按 unitId 缓存（每帧调用，不能反复查 DI）。
        */
       const measureFlashBox = (row: number, col: number): FlashBox | null => {
         const canvas = activeCanvas();
@@ -1467,24 +1225,15 @@ export function App() {
       };
 
       /**
-       * 互换完成后的"落点提醒"：**取消普通选中** + 把刚换过的两格用**黄色框**标出来，
-       * 黄框会**逐渐透明并自动消失**，且**不挡任何操作**（用户明确要求）。
-       *
-       * 实现演进（踩过两次坑，别再回去）：
-       *  1. 一开始把自定义样式塞进 `SheetsSelectionsService.setSelections` 的 `style` 字段——**无效**：
-       *     选区渲染用的是它自己 protected 的 `_selectionStyle`，用户看到的还是主题默认蓝框，
-       *     看上去就像"互换后还选中着"（用户实测反馈）。
-       *  2. 改用标记图层 `fWorksheet.highlightRanges()`：颜色对了，但**做不了渐隐**，
-       *     而且每帧刷新都要重绘画布（大表会卡）。
-       *  现在：自己画 DOM 浮层（`src/interaction/swap-flash.ts`）：CSS 透明度动画 + `pointer-events: none`，
-       *  穿透、不重绘画布、自动消失；每帧只把最新的矩形写进 transform（滚动/缩放会跟随）。
+       * 互换完成后的"落点提醒"：取消普通选中 + 把换过的两格用黄色框标出（渐隐、自动消失、不挡操作）。
+       * 两条走不通的路（别再回去）：往 `setSelections` 的 style 塞自定义样式无效；`highlightRanges()`
+       * 做不了渐隐且每帧重绘画布。现在自画 DOM 浮层 + CSS 透明度动画 + `pointer-events: none`。
        */
       const flashSwappedRanges = (firstA1: string, secondA1?: string): void => {
         const sheet = getSheet();
         if (!sheet) return;
         clearCellSelection();
-        // Univer 的选区写入是**异步命令**：pointerup 之后紧跟的 click 有时会把选区再写回来。
-        // 只在当帧清一次会漏，因此再连清几帧（只清"这次互换涉及的两格"，不碰用户新选的区域）。
+        // 选区写入是异步命令，pointerup 后的 click 可能把它写回来，见 clearSelectionSoon
         clearSelectionSoon([firstA1, secondA1].filter((a1): a1 is string => Boolean(a1)));
         try {
           const targets: FlashTarget[] = [firstA1, secondA1]
@@ -1493,8 +1242,7 @@ export function App() {
               const rect = sheet.getRange(a1).getRange();
               return { a1, row: rect.startRow, col: rect.startColumn };
             });
-          // 自检：算出来的矩形中心做一次命中测试，落不回原格就说明坐标换算变了（宁可日志暴露，
-          // 也不要画一个位置错误的框骗用户）。
+          // 自检：矩形中心做一次命中测试，落不回原格就说明坐标换算变了（宁可日志暴露，也不画错位的框）
           const mismatch = targets.filter((target) => {
             const box = measureFlashBox(target.row, target.col);
             if (!box) return false;
@@ -1540,19 +1288,15 @@ export function App() {
         {
           onTargetChange: (target, h) => {
             /**
-             * 落在**工作区**上方时不算"不能放置"。
-             *
-             * 用户实测反馈：拖单元格到工作区，屏幕上却提示"此处不能放置"（其实能放）。
-             * 原因是命中测试只认表格画布，指针跑到侧边栏上时 target 为 null → 拖拽控制器给的是 reject。
-             * 这里按指针位置再判一次：在侧边栏范围内就是"可放置（暂存到工作区）"。
+             * 落在**工作区**上方时不算"不能放置"：命中测试只认表格画布，指针在侧边栏上时控制器给 reject，
+             * 用户会看到"此处不能放置"（其实能放）。这里按指针位置再判一次。
              */
             const pointer = lastPointerRef.current;
             const overSidebar = isInsideSidebar(pointer);
             const effective: DropHint | 'workspace' = overSidebar ? 'workspace' : h;
             setHint(effective);
-            // 落点高亮：拖动时把"即将被交换/写入"的那一格框出来（用户要求）。
-            // 落点无效（重叠/越界）时换成红色虚线，用户不用松手就知道这一下不成立；
-            // 指针在工作区上时没有网格落点，把高亮收掉。
+            // 落点高亮：把"即将被交换/写入"的那一格框出来；落点无效时换红色虚线，
+            // 指针在工作区上时没有网格落点，把高亮收掉
             targetHighlightRef.current?.show(
               target && !overSidebar
                 ? [
@@ -1589,8 +1333,8 @@ export function App() {
         flashOverlayRef.current = null;
         targetHighlightRef.current?.dispose();
         targetHighlightRef.current = null;
-        // 滚动条上的"抓取高亮"节点是直接挂到 document.body 的：卸载时若指针正悬在条带上
-        // （hover 态不会自己消失），它会变成一个永久游离在 body 上的节点 → 这里兜底摘掉
+        // 滚动条"抓取高亮"节点直接挂在 document.body 上：指针若正悬在条带上（hover 态不会自己消失），
+        // 卸载后会变成永久游离节点，这里兜底摘掉
         hideScrollbarGrab();
         if (selectionClearRafRef.current !== null) window.cancelAnimationFrame(selectionClearRafRef.current);
         selectionClearRafRef.current = null;
@@ -1602,10 +1346,7 @@ export function App() {
       swapAnimRef.current = createSwapAnimation({ reducedMotion: window.matchMedia('(prefers-reduced-motion: reduce)').matches });
       clickSwapRef.current = createClickSwapController({
         onSelectionChange: (sides) => {
-          /**
-           * 把"待互换的那一方"同步到界面：工作区条目要亮起来（`is-pending`），
-           * 让用户知道"我已经点了它，接着点表格里的格子即可互换"（用户要求支持这种顺序）。
-           */
+          /** 把"待互换的那一方"同步到界面：工作区条目亮起（`is-pending`），提示"接着点表格里的格子即可互换" */
           const first = sides[0] ?? null;
           setPendingSwapItemId(first?.kind === 'workspace' ? (first.itemId ?? null) : null);
           setPendingSwapLabel(first?.label ?? null);
@@ -1632,9 +1373,8 @@ export function App() {
           if (!sheet) return;
 
           /**
-           * 带 Shift/Ctrl 的点击是"框选"（见 onPointerDown 的说明）。这里分两种情况：
-           * - 框出来还是单格 → 用户只是在定位，不当选边；
-           * - 框出了一片区域 → 就是"我要互换这块区域"，照常登记为一方（否则区域互换不可达）。
+           * 带 Shift/Ctrl 的点击是"框选"（见 onPointerDown）：框出单格 = 用户只是在定位，不当选边；
+           * 框出一片区域 = 要互换这块区域，照常登记为一方（否则区域互换不可达）。
            */
           if (modifierPressRef.current) {
             const rect = sheet.getActiveRange()?.getRange();
@@ -1664,37 +1404,23 @@ export function App() {
 
       /**
        * 指针接线：直接拖拽（无长按）+ 非选择模式下屏蔽原生扩选。
-       *
-       * 交互约定（用户明确要求）：
-       * - 选择模式：完全交给 Univer，可以框选、可以出现多选框；
-       * - 拖拽模式：按住即可拖动搬运/互换（**不需要长按**），且**不出现多选框**；
-       * - 点击互换模式：点击选边，同样**不出现多选框**。
-       *
-       * 实现要点：`pointerdown` 不拦截（让 Univer 正常选中指针下的那一个单元格），
-       * 但从按下开始的 `pointermove` 在非选择模式下**拦掉**，Univer 就永远没有机会把选区扩成一片。
-       * 代价是它的 `CellPointerMove` 不再派发，落点命中改由 `hitTestCell` 负责。
+       * 选择模式完全交给 Univer（可框选）；拖拽模式按住即可搬运/互换、点击互换模式点选边，两者都不出现
+       * 多选框。实现上 `pointerdown` 不拦截，但从按下起的 `pointermove` 在非选择模式拦掉，Univer 就没机会
+       * 扩成一片；代价是 `CellPointerMove` 不再派发，落点命中改由 `hitTestCell` 负责。
        */
       const pressRef = { current: null as null | { x: number; y: number; onGrid: boolean; dragging: boolean; modifier: boolean } };
 
       /**
-       * 这一次按压是不是"落在表格网格上"。
-       *
-       * 关键：**只认主画布**（`univer-sheet-main-canvas`）。早先写成 `container.contains(target)`，
-       * 把 Univer 自带的一切 UI 都算进去了——底部缩放条、工作表标签、公式栏、单元格编辑器都在容器内，
-       * 结果在拖拽/点击互换模式下按住它们拖动会被当成"扩选"拦掉、甚至启动一次内容搬运：
-       * 用户看到的就是"右下角放大缩小功能失效了"（实测踩过）。
-       *
-       * 行/列表头是另外的画布，也不在这里面——拖表头仍然是原生的选行/选列行为。
+       * 这一次按压是不是"落在表格网格上"。**只认主画布**（`univer-sheet-main-canvas`）：
+       * 用 `container.contains(target)` 会把缩放条/工作表标签/公式栏/编辑器都算进去，按住它们拖动会被
+       * 当成扩选拦掉（表现为"右下角放大缩小失效"）；行/列表头是另外的画布，拖表头仍是原生的选行/选列。
        */
       const isGridTarget = (target: EventTarget | null): boolean => {
         if (!(target instanceof HTMLCanvasElement)) return false;
         return target.id.startsWith('univer-sheet-main-canvas');
       };
 
-      /**
-       * 取当前活动工作簿主视口的 scene / viewport（滚动条命中与滚动量都要用）。
-       * 每次都现取：切标签、切工作表都会换渲染实例，缓存反而容易取到旧的。
-       */
+      /** 取活动工作簿主视口的 scene / viewport（滚动条命中与滚动量用）。每次现取：切标签/切表都会换渲染实例 */
       const getMainViewport = (): {
         scene: {
           getViewport?: (key: unknown) => unknown;
@@ -1732,13 +1458,9 @@ export function App() {
       };
 
       /**
-       * 滚动条在**页面**坐标里的位置（滚动条交互带）。
-       *
-       * 为什么需要：滚动条画在**主视口**右缘/下缘，而主画布比视口大（四周有表头与留白），
-       * 所以"画布最右边 4px"根本不在滚动条上——e2e 按这个带子的中心按下去才按得准。
-       *
-       * 实现：直接用引擎自己的 `ScrollBar.pick()` 沿着边缘扫出命中位置，不猜几何
-       * （track 的 rect 字段可能还没布局，尺寸算出来会是 NaN）。
+       * 滚动条在**页面**坐标里的位置（交互带）：滚动条画在主视口右缘/下缘，而画布比视口大，
+       * 所以"画布最右边 4px"并不在滚动条上。用引擎的 `ScrollBar.pick()` 沿边缘扫出命中位置，
+       * 不猜几何（track 的 rect 可能还没布局，算出来是 NaN）。
        */
       const getScrollbarBand = (): {
         vertical: { x: number; y: number; width: number; height: number } | null;
@@ -1771,10 +1493,7 @@ export function App() {
         const barX = rect.left + (rect.width - (verticalInset ?? 8));
         const barY = rect.top + (rect.height - (horizonInset ?? 8));
 
-        /**
-         * 滑块（thumb）与轨道（track）都命中滚动条，但**只有拖滑块才会连续滚动**（点轨道是翻页跳转）。
-         * `pick()` 返回命中的那个 Rect：滑块的 rect 高度更小，据此把滑块所在的 y 区间挑出来。
-         */
+        /** 滑块与轨道都命中滚动条，但只有拖滑块才会连续滚动；pick() 返回命中的 Rect，滑块高度最小，据此挑出 y 区间 */
         const findThumb = (
           sample: (step: number) => { height: number } | null,
           limit: number,
@@ -1789,7 +1508,7 @@ export function App() {
             byHeight.set(key, [...(byHeight.get(key) ?? []), step]);
           }
           if (byHeight.size === 0) return null;
-          // track 通常贯穿整条；滑块的 rect 高度最小 → 取最小高度那一组
+          // track 贯穿整条，滑块高度最小 → 取最小高度那一组
           const smallest = [...byHeight.keys()].sort((a, b) => a - b)[0];
           const steps = byHeight.get(smallest) ?? [];
           if (steps.length === 0) return null;
@@ -1819,12 +1538,8 @@ export function App() {
       };
 
       /**
-       * **当前工作簿自己的那块主画布**。
-       *
-       * 多工作簿时页面里会有多块 `univer-sheet-main-canvas*`（每个 unit 一块），
-       * `querySelector` 拿到的是**DOM 里第一块**——可能属于别的（甚至已隐藏的）工作簿，
-       * 于是"画布坐标 ↔ 视口几何"就对不上了（滚动条拖不动、提醒框位置怪）。
-       * 这里按活动 unit 的 id 精确定位，找不到才退回第一块。
+       * **当前工作簿自己的那块主画布**：多工作簿时页面里有多块同名 canvas，`querySelector` 拿到的
+       * 第一块可能属于别的（甚至已隐藏的）工作簿，画布坐标 ↔ 视口几何就全错。按活动 unit id 精确定位。
        */
       const activeCanvas = (): HTMLCanvasElement | null => {
         const unitId = apiRef.current?.getActiveWorkbook()?.getId();
@@ -1837,35 +1552,19 @@ export function App() {
       };
 
       /**
-       * 指针是不是落在**滚动条**上。
-       *
-       * 为什么需要：非选择模式下我们会拦掉 pointermove（阻止 Univer 把拖动当成扩选、画出多选框）。
-       * 但 Univer 的滚动条就画在主画布上，拦掉 pointermove 等于**把滚动条拖拽也一起废掉**。
-       * 判定按**条带**走（见 `resolveScrollbarPress`），不再要求精确压住那 5~6px 的滚动条。
+       * 指针是不是落在滚动条上。非选择模式下我们拦掉 pointermove（阻止扩选/多选框），
+       * 但滚动条就画在主画布上，不区分会连滚动条拖拽一起废掉。判定按条带走（见 `resolveScrollbarPress`）。
        */
       const isScrollbarHit = (x: number, y: number): boolean => {
         return resolveScrollbarPress(x, y) !== null;
       };
 
       /**
-       * 滚动条拖拽的几何（自己实现，见 `src/interaction/scrollbar-drag.ts` 的说明）。
-       *
-       * 实测坑：`verticalScrollTrack` / `verticalThumbRect` 这些 Rect 只有 width/height，
-       * **没有可用的 x/y**（在画布坐标里定位不了）。所以改用引擎自己的 `pick()`：
-       *   - `pick` 命中的矩形本身就是"滑块或轨道"，用它判断轴向（细长=竖向、扁宽=横向）与是否按在滑块上；
-       *   - 轨道范围沿该轴扫一遍 `pick`（命中区间的首尾）得到 origin/length，比猜几何可靠。
-       */
-      /**
-       * 解析"这次按下是不是在滚动条上"，并给出拖动所需的几何。
-       *
-       * **重做后的模型（用户反馈"完全拖不动"之后的第三次修订）**：
-       *  ① 先看**条带**，不看"精确压住滚动条"：从"视口右缘/下缘往里 24px"到"画布右缘/下缘"都算。
-       *     实测原因：真实夹具里画布 1110px、主视口只有 933px，滚动条画在视口右缘**只有 5~6px 宽**，
-       *     右边还有 170px 死区；早先要求引擎 `pick()` 精确命中，偏一点就完全没反应。
-       *  ② 轴向由两条条带谁更"贴身"决定（同时落在两条带里时取更近的一条）。
-       *  ③ 轨道长度/滑块长度/滚动上限**优先用引擎给的数**，拿不到就用"内容尺寸 − 视口尺寸"推算，
-       *     任何一项缺失都不会让拖动变成"什么都没发生"。
-       *  ④ 是否按在滑块上由**滚动量推算**（`isOnThumb`），不依赖 `pick` 的命中矩形。
+       * 解析"这次按下是不是在滚动条上"并给出拖动几何（见 `src/interaction/scrollbar-drag.ts`）。
+       * ① `verticalScrollTrack` 这类 Rect 只有 width/height、没有可用的 x/y，所以用引擎的 `pick()`
+       * 判断轴向与是否按在滑块上，并沿该轴扫出轨道 origin/length；
+       * ② 判定按**条带**走（视口边缘往里 `SCROLLBAR_STRIP_PX` 到画布边缘），不要求精确压住 5~6px 的滚动条；
+       * ③ 轨道/滑块长度/滚动上限优先用引擎给的数，拿不到就推算；④ 是否按在滑块上由滚动量推算。
        */
       const resolveScrollbarPress = (
         x: number,
@@ -1920,7 +1619,7 @@ export function App() {
 
         const engineLimit = (axis === 'y' ? bar?.limitY : bar?.limitX) ?? 0;
         const limit = engineLimit > 0 ? engineLimit : Math.max(0, contentSize - viewportSize);
-        // 内容装得下 → 没有可滚的东西，不要抢这次按下（交给正常交互）
+        // 内容装得下就没有可滚的，不要抢这次按下（交给正常交互）
         if (limit <= 0) return null;
 
         const engineThumb = ((axis === 'y' ? bar?.verticalThumbSize : bar?.horizontalThumbSize) ?? 0) as number;
@@ -1933,10 +1632,7 @@ export function App() {
         };
       };
 
-      /**
-       * 拖滚动条时的**可视反馈**：在滚动条上盖一条高亮，让用户知道"抓住了"。
-       * 只是 DOM 浮层（穿透、不吃事件），松手即收；不碰 Univer 的画布。
-       */
+      /** 拖滚动条时的可视反馈：DOM 浮层高亮（穿透、不吃事件），松手即收，不碰 Univer 画布 */
       const showScrollbarGrab = (x: number, y: number, axis: 'y' | 'x'): void => {
         const host = document.createElement('div');
         host.className = 'scrollbar-grab';
@@ -1973,12 +1669,7 @@ export function App() {
         scrollbarGrabRef.current = null;
       };
 
-      /**
-       * 悬停在滚动条**条带**上时的提示（不按下也显示）。
-       *
-       * 用户反馈"滚动条很难用"很大一部分是"不知道哪里能抓"：滚动条只有 5~6px 宽，
-       * 而我们的交互条带有 24px。所以指针扫到条带里就给一条淡高亮，明确告诉用户"这儿能拖"。
-       */
+      /** 悬停提示：滚动条只有 5~6px 宽、用户不知道哪里能抓，指针扫到条带就给一条淡高亮 */
       const updateScrollbarHover = (x: number, y: number): void => {
         if (scrollDragRef.current) return; // 拖动中由 showScrollbarGrab 管
         const canvas = activeCanvas();
@@ -2030,7 +1721,7 @@ export function App() {
         const scrollbar = onCanvas && isScrollbarHit(e.clientX, e.clientY);
         const onGrid = onCanvas && !scrollbar;
         if (scrollbar) {
-          // 滚动条拖拽由我们接管：按住即可左右/上下拖，滑块**跟手**（见 scrollbar-drag.ts）
+          // 滚动条拖拽由我们接管：按住即可拖，滑块跟手（见 scrollbar-drag.ts）
           const drag = resolveScrollbarPress(e.clientX, e.clientY);
           if (drag) {
             const current = getMainViewportScroll();
@@ -2054,17 +1745,17 @@ export function App() {
           }
           log('scrollbar:press-unhandled', {});
         }
-        // 在表格里按下指针 = 用户开始新的操作 → 收掉提醒框、取消"补清选区"
-        // （取消很重要：否则用户紧接着点的那一格会被我们的补清逻辑抢掉）
+        // 在表格里按下 = 用户开始新操作 → 收提醒框、取消"补清选区"
+        // （取消很重要：否则紧接着点的那一格会被补清逻辑抢掉）
         if (onGrid) {
           clearSwapFlashRef.current();
           cancelSelectionClears();
-          // 表格拿到指针焦点 → 重新置 FOCUSING_SHEET（编辑器/公式栏会把焦点抢走，
+          // 表格拿到指针焦点 → 重新置 FOCUSING_SHEET（编辑器/公式栏会抢走焦点，
           // 不重新置位的话"编辑过一次单元格之后滚轮就不滚了"）
           focusSheetUnit(activeTabIdRef.current);
         }
-        // 按住 Shift/Ctrl/Cmd = 用户显式要"原生选择"（例如点击互换模式下要框出一个区域来互换）。
-        // 这条规则让"不出现多选框"与"区域互换"两个需求同时成立：不按修饰键就绝不会出现多选框。
+        // 按住 Shift/Ctrl/Cmd = 用户显式要"原生选择"（例如点击互换模式下框出一个区域来互换）。
+        // 这条规则让"不出现多选框"与"区域互换"两个需求同时成立
         const modifier = e.shiftKey || e.ctrlKey || e.metaKey;
         pressRef.current = { x: e.clientX, y: e.clientY, onGrid, dragging: false, modifier };
         modifierPressRef.current = modifier;
@@ -2073,11 +1764,8 @@ export function App() {
       };
 
       /**
-       * 拖动期间把选区"钉"在源区域上（逐帧 rAF 兜底）。
-       *
-       * 时序上踩过坑：只在 pointermove 里用 `queueMicrotask` 还原**抢不过** Univer——它的选区写入是
-       * 异步命令，会排在我们的微任务之后落地（实测拖到第 3 步就失守）。rAF 在该帧所有微任务之后、
-       * 绘制之前执行，才是真正的"最后一次写入"。屏蔽 pointermove 之后这里主要作为兜底。
+       * 拖动期间把选区"钉"在源区域上（逐帧 rAF 兜底）。用 queueMicrotask 抢不过 Univer——
+       * 它的选区写入是异步命令，会排在微任务之后落地；rAF 在该帧所有微任务之后、绘制之前执行。
        */
       const restorePinnedSelection = (): void => {
         const a1 = dragSourceA1Ref.current;
@@ -2134,9 +1822,8 @@ export function App() {
         }
 
         const press = pressRef.current;
-        // 非选择模式：从按下开始就拦掉 pointermove，Univer 永远没机会把选区扩成一片多选框。
-        // （pointerdown 不拦，所以"点哪个格子就选中哪个格子"仍然是原生行为。）
-        // 按了 Shift/Ctrl 则放行——那是用户显式要框选（见 onPointerDown 的说明）。
+        // 非选择模式：从按下起就拦掉 pointermove，Univer 没机会把选区扩成多选框
+        // （pointerdown 不拦，"点哪个格子选中哪个"仍是原生行为）；按了 Shift/Ctrl 则放行（用户要框选）
         if (press?.onGrid && !press.modifier && modeRef.current !== 'select') {
           e.stopPropagation();
           e.preventDefault();
@@ -2187,11 +1874,7 @@ export function App() {
         }
         const wasDragging = pressRef.current?.dragging ?? false;
         const wasGridPress = pressRef.current?.onGrid ?? false;
-        /**
-         * 记下"刚在表格里点过"：`handleWorkspaceBlankClick` 用它判断
-         * "选中单元格后短时间内点工作区空白 = 快速加入"这条捷径是否在窗口期内。
-         * 只认**没拖动的表格按下**（拖动是搬运语义，不该同时触发快速加入）。
-         */
+        /** 记下"刚在表格里点过"，供快速加入判断窗口期；只认没拖动的表格按下（拖动是搬运语义） */
         if (wasGridPress && !wasDragging) lastGridInteractionAtRef.current = Date.now();
         pressRef.current = null;
         const pending = pendingWorkspaceDragRef.current;
@@ -2199,10 +1882,8 @@ export function App() {
         if (pending && !pending.started) pendingWorkspaceDragRef.current = null;
 
         /**
-         * 收尾顺序很关键（用户实测："互换后还选中最开始那一格"就是这么来的）：
-         *  先停掉"钉选区"的逐帧循环、并清掉源标记，**再** finish()。
-         * 以前是先 finish() 再 `restorePinnedSelection()`——互换刚把选区清干净，
-         * 紧接着就被"钉"回了**源单元格**，看起来就是"互换后还选中着最开始那一格"。
+         * 收尾顺序很关键：先停"钉选区"的逐帧循环、清掉源标记，**再** finish()。
+         * 反过来的话，互换刚清干净的选区会被钉回源单元格（表现为"互换后还选中着最开始那一格"）。
          */
         stopPinLoop();
         dragSourceA1Ref.current = null;
@@ -2213,10 +1894,7 @@ export function App() {
         // 真正拖动过 → 收尾清选区（补清逻辑会连清几帧并带一次延时兜底，用户一动指针即取消）
         if (wasDragging || wasWorkspaceDrag) clearSelectionSoon();
 
-        /**
-         * 工作区条目上"按下 → 没拖动就松手" = 一次**点击**。
-         * 点击互换模式下把它登记为待互换的一方（用户要求：可以先点工作区、再点表格）。
-         */
+        /** 工作区条目上"按下 → 没拖动就松手" = 一次点击；点击互换模式下登记为待互换的一方 */
         const clickedItem = pendingWorkspaceClickRef.current;
         pendingWorkspaceClickRef.current = null;
         if (clickedItem && !wasWorkspaceDrag) {
@@ -2227,10 +1905,7 @@ export function App() {
       window.addEventListener('pointerdown', onPointerDown, true);
       window.addEventListener('pointermove', onPointerMove, true);
       window.addEventListener('pointerup', onPointerUp, true);
-      /**
-       * 键盘也算"在表格里动手"：用方向键/Shift+方向键改选区后，同样应该能在 3 秒内
-       * 点工作区空白把选区收进去（user 那条捷径的键盘版）。只在焦点确实落在表格容器里时才算。
-       */
+      /** 键盘也算"在表格里动手"（快速加入的键盘版）；只在焦点确实落在表格容器里时才算 */
       const onKeyDownInSheet = (event: KeyboardEvent): void => {
         const container = containerRef.current;
         if (!container) return;
@@ -2302,21 +1977,15 @@ export function App() {
         setItems,
         toast,
         getSheet,
-        // 注意：它在本组件里声明得比这个 effect 晚（第 2700 行附近）。闭包延迟取值，运行时早就初始化好了。
+        // 注意：它在本组件里声明得比这个 effect 晚。闭包延迟取值，运行时早就初始化好了。
         ensureActiveUnitRendered,
       });
 
       // ---------------------------------------------------------------- 文件拖放打开
       /**
-       * 把 Excel 工作簿（OOXML：.xlsx / .xlsm / .xltx / .xltm）**拖进窗口**就打开它。
-       *
-       * 用户实测反馈："无法打开 xxx.xlsx"——而应用自己的提示写的是"拖入 xlsx 或使用左侧示例开始"，
-       * 实际上**根本没有接文件拖放**（拖进来毫无反应，浏览器还可能直接跳转去打开那个文件）。
-       * 这里在窗口级接管：
-       *  - 只处理带 `Files` 的拖放（内部内容拖拽不带 Files，互不干扰）；
-       *  - `dragover` 必须 preventDefault，否则浏览器不会触发 drop、还会接管这次拖放；
-       *  - 支持一次拖多个文件（逐个开成标签页）；打不开的格式按类别给出"为什么 + 怎么办"
-       *    （见 `src/importer/file-kinds.ts`）。
+       * 把 Excel 工作簿拖进窗口就打开（窗口级接管）：
+       * 只处理带 `Files` 的拖放（内部内容拖拽不带 Files，互不干扰）；`dragover` 必须 preventDefault，
+       * 否则浏览器不会触发 drop；支持一次拖多个（逐个开成标签页）。
        */
       const dragTypes = (event: DragEvent): string[] => {
         try {
@@ -2345,9 +2014,8 @@ export function App() {
         const files = Array.from(event.dataTransfer?.files ?? []);
         if (files.length === 0) return;
         /**
-         * 拖放的可接受范围要跟形态走：本地版 + 本机 Excel 可用时，`.xlsb` 也能打开
-         * （先借 Excel 转成 xlsx）；否则按"打不开"处理并说明原因。
-         * 这里读 **ref**：引导 effect 只跑一次，闭包里的 state 会永远是初值。
+         * 可接受范围跟形态走：本地版 + 本机 Excel 可用时 `.xlsb` 也能打开（先借 Excel 转换）。
+         * 读 **ref**：引导 effect 只跑一次，闭包里的 state 永远是初值。
          */
         const acceptable = (name: string): boolean =>
           isSupportedWorkbookFile(name) || (bridgeStatusRef.current.available && isBridgeOnlyFile(name));
@@ -2434,12 +2102,8 @@ export function App() {
           log('session:restore-start', { tabs: state.tabs.length, workspace: state.workspace?.length ?? 0 });
           if (state.workspace?.length) {
             /**
-             * 旧版本（"空"只判 `null` 的那版）可能把空内容存进了会话。
-             * 恢复时顺手清掉，保证"工作区里绝对没有空条目"这条规则跨会话也成立。
-             *
-             * 同时**按 id 去重**（与 `addWorkspaceItems` 同一套口径）：万一会话里同一个快照存了两遍
-             * （历史版本写坏过、或并发保存），恢复出来就会是同 id 的两张卡片 —— React key 冲突、
-             * 删除一张另一张也跟着消失，属于"看起来像自我复制"的同类问题。
+             * 恢复时清掉空条目（保证"工作区里绝对没有空条目"跨会话成立），并**按 id 去重**：
+             * 同一个快照存两遍会变成同 id 的两张卡片 —— React key 冲突，删一张另一张也跟着消失。
              */
             const seen = new Set<string>();
             const restored = state.workspace.filter((item) => {
@@ -2455,12 +2119,10 @@ export function App() {
             syncSnapshotStore(restored);
           }
 
-          // 恢复现场：**只实体化当前要看的那个标签**，其余标签先"冷"着（只记字节与编辑）。
-          // 以前这里 for 循环把所有标签都解析并建簿——开 5 个百万标签就是 5 份常驻内存
-          // （≈2.5 GB，见 M4-多标签内存分析.md）。现在切到哪个标签才重建哪个，内存从 O(N) 变 O(1~K)。
-          //
-          // **按 id 去重**：热更新会重跑引导 effect 而内存里的标签还在（见上面的 `app:hot-reboot`），
-          // 无脑追加就会得到两个同 id、同名的"灵魂标签"（用户实测反馈）。这里只补会话里缺的那些。
+          // **只实体化当前要看的那个标签**，其余先"冷"着（只记字节与编辑）：全量解析建簿的话，
+          // 5 个百万格标签就是 5 份常驻内存；现在内存从 O(N) 变 O(1~K)。
+          // **按 id 去重**：热更新重跑引导 effect 时内存里的标签还在（见 `app:hot-reboot`），
+          // 无脑追加会出现同 id 同名的"灵魂标签"。这里只补会话里缺的那些。
           const known = new Set(tabsDataRef.current.map((item) => item.id));
           let alreadyKnown = 0;
           for (const tab of state.tabs) {
@@ -2512,15 +2174,8 @@ export function App() {
       const logTimer = window.setInterval(() => setEntries([...p0log]), 400);
     return () => {
       window.clearInterval(logTimer);
-      /**
-       * ① **先把现场落盘**（必须在 `boot.dispose()` 与自动保存器 dispose 之前）。
-       *
-       * 热更新（HMR）重跑本 effect 时页面**并不卸载**，因此没有 `pagehide`；
-       * 而自动保存是"2 秒轮询 + 800ms 去抖"，最近这一两秒的编辑很可能还在内存里。
-       * 这里同步取一份现场直接写库（`collectSessionState` 是纯读取，能拿到 Univer 的脏格），
-       * 紧接着的重启恢复就能把最新内容接回来——否则热更新会把刚敲进去的内容吞掉。
-       * 真正关闭页面时这一步同样无害（写的是同一份数据，pagehide 也会做一次）。
-       */
+      /** ① **先把现场落盘**（必须在 `boot.dispose()` 与自动保存器 dispose 之前）：HMR 重跑本 effect 时
+       * 页面并不卸载、没有 `pagehide`，而自动保存是"2 秒轮询 + 800ms 去抖"，最近一两秒的编辑还在内存里 */
       if (!restoringRef.current) {
         try {
           const state = collectSessionState();
@@ -2534,15 +2189,10 @@ export function App() {
       lockRef.current?.restore();
       guardRef.current?.restore();
       /**
-       * ③ 把"按 unitId 记账"的全局账本也清掉，并**摘掉挂在 window 上的测试钩子**。
-       *
-       * 为什么必须做：
-       *  - 整个 Univer 实例都要拆了 → 它名下所有插图的 blob url 一并回收（HMR/卸载都会走这里）；
-       *  - `dirtyByWorkbook` 是模块级的（跨实例存活），不清就会跟着下一个 Univer 实例留下旧账
-       *    （示例/占位单元用固定 id `p0-workbook`，最容易被继承）；
-       *  - `window.__p0` / `window.__app` 上挂的钩子闭包持有 `tabsDataRef`（**每个标签的整份原始字节**）
-       *    与工作区快照表。它以前从不移除，所以在"真的卸载"（非 HMR）路径上，这些 MB 级对象
-       *    即使在 boot.dispose() 之后仍然可达、回收不掉。
+       * ③ 清掉"按 unitId 记账"的全局账本，并摘掉挂在 window 上的测试钩子：
+       * 插图 blob url 要随实例回收；`dirtyByWorkbook` 是模块级的，不清会被下一个实例继承
+       * （示例/占位单元用固定 id，最容易被继承）；`window.__p0`/`__app` 的钩子闭包持有
+       * `tabsDataRef`（每个标签的整份原始字节）与快照表，不移除就永远回收不掉。
        */
       releaseAllImageObjectUrls();
       resetAllDirty();
@@ -2575,7 +2225,6 @@ export function App() {
     return () => window.cancelAnimationFrame(raf);
   }, []);
 
-  // ---------------------------------------------------------------- 文件导入
   // ---------------------------------------------------------------- 多标签页
   const syncTabs = useCallback(() => {
     setTabs(
@@ -2588,19 +2237,11 @@ export function App() {
   }, []);
 
   /**
-   * 释放一个工作簿单元时的**统一记账清理**（关标签 / 冷存 / 拆示例簿都走它）。
-   *
-   * 为什么要收口（一次审计查出来的真实泄漏 + 一处正确性副作用）：
-   *  `disposeUnit` 只放掉 Univer 自己的模型，而我们还有几本**按 unitId 记账**的东西：
-   *  Univer 的撤销栈（不随 dispose 清）、插图 blob url（钉着图片字节）、
-   *  渲染单元缓存（scene/skeleton）、编辑桶、脏格账本、填充柄日志去重表。
-   *  以前 `closeTab` 手写了 4 项、`coldStoreTab` 一项都没写、`disposeSampleWorkbook` 同样没有 ——
-   *  于是：① 冷存期间这些账还占着内存，冷存省下来的东西被抵消一部分；
-   *  ② **示例簿/占位簿复用同一个 id（`p0-workbook`）**，它释放后脏格账本跨实例存活，
-   *  新实例会继承上一次的脏格计数（`dirtyCellCount` 既决定标签上的红点，也是外科式导出的依据）。
-   *  收口之后，"以后再加一项清理"只要改这一处，不会再漏掉某条释放路径。
-   *
-   * @param keepTabState 冷存必须传 `true`：标签还要切回来重建，编辑桶与脏格账本是重建与导出的依据。
+   * 释放一个工作簿单元时的**统一记账清理**（关标签 / 冷存 / 拆示例簿都走它）。`disposeUnit` 只放掉
+   * Univer 的模型，而按 unitId 记账的还有撤销栈（不随 dispose 清）、插图 blob url、渲染单元缓存、
+   * 编辑桶、脏格账本、填充柄日志去重表。分散手写必然漏；尤其示例簿/占位簿复用同一个固定 id，
+   * 脏格账本跨实例存活会让新实例继承旧计数（`dirtyCellCount` 既是标签红点，也是外科式导出的依据）。
+   * @param keepTabState 冷存必须传 `true`：标签还要切回来重建，编辑桶与脏格账本是重建与导出依据。
    * @returns 顺带归还的插图 blob url 个数（日志用）
    */
   const releaseUnitBookkeeping = useCallback((id: string, options: { keepTabState?: boolean } = {}): number => {
@@ -2622,10 +2263,7 @@ export function App() {
     return urlsReleased;
   }, []);
 
-  /**
-   * 冷存一个标签：**先把编辑快照下来**（否则随模型一起消失），再 dispose 掉 Univer 工作簿。
-   * 字节、文件名、编辑桶都留着，切回时重建。
-   */
+  /** 冷存一个标签：先把编辑快照下来（否则随模型一起消失），再 dispose 掉工作簿；字节/文件名/编辑桶留着 */
   const coldStoreTab = useCallback(
     (id: string): boolean => {
       const api = apiRef.current;
@@ -2640,15 +2278,8 @@ export function App() {
         const captured = snapshotEditsForRef.current(id);
         api.disposeUnit(id);
         tabRuntimeRef.current = markTabCold(tabRuntimeRef.current, id);
-        /**
-         * 工作簿被释放了，它名下那几本账也要一起还：
-         *  - **插图 blob url**：否则冷存只省下模型，图片字节还钉在内存里；
-         *  - **Univer 撤销栈**：不随 dispose 清，冷存期间一直占着每次编辑的 mutation 快照
-         *    （重建时本来就会清，所以提前清不损失任何行为）；
-         *  - **渲染单元缓存**：否则仍指着已释放的 scene/skeleton。
-         * 安全前提：切回重建会重走 `applyWorkbookFeatures` 重新插图（`buildTabUnit`）。
-         * 注意**不能**用 `clearUndoRedoFor`：那会连全局历史账本一起重置（账本属于当前活动标签）。
-         */
+        /** 工作簿被释放，它名下那几本账一起还（明细见 releaseUnitBookkeeping）；切回重建会重走
+         * `applyWorkbookFeatures` 重新插图。注意**不能**用 `clearUndoRedoFor`：那会连全局历史账本一起重置 */
         const urlsReleased = releaseUnitBookkeeping(id, { keepTabState: true });
         log('tab:cold-store', {
           id,
@@ -2674,23 +2305,15 @@ export function App() {
     [coldStoreTab],
   );
 
-  /**
-   * 首个真实文件进来后，把启动时的"示例工作簿"释放掉。
-   * 它不参与标签管理（不在 `tabsDataRef` 里），以前会一直常驻——白占一份工作簿的内存。
-   */
+  /** 首个真实文件进来后释放启动时的"示例工作簿"（它不参与标签管理，否则白占一份工作簿内存） */
   const disposeSampleWorkbook = useCallback(() => {
     try {
       const api = apiRef.current;
       if (!api || tabsDataRef.current.length === 0) return;
-      // 示例簿一旦被顶掉就取不到它了（`getWorkbook(id)` 返回 null），所以这里用 try 包住：
-      // 存在就释放，不存在就算了。
+      // 示例簿一旦被顶掉就取不到它了（`getWorkbook(id)` 返回 null），所以用 try 包住：存在就释放
       if (!api.getWorkbook(SAMPLE_WORKBOOK_ID)) return;
       api.disposeUnit(SAMPLE_WORKBOOK_ID);
-      /**
-       * 示例簿/占位簿**复用同一个固定 id**（`p0-workbook`），所以这里必须把它的记账也清掉：
-       * 否则它被释放后脏格账本仍挂在这个 id 上，而占位单元用同一个 id 重建 →
-       * 新实例直接继承上一次的脏格计数（标签上的红点、以及外科式导出的"要回写哪些格子"都会错）。
-       */
+      // 同上：示例簿/占位簿复用同一个固定 id，不清记账会让新实例继承旧的脏格计数
       releaseUnitBookkeeping(SAMPLE_WORKBOOK_ID);
       log('tab:sample-disposed', { id: SAMPLE_WORKBOOK_ID });
     } catch (error) {
@@ -2698,15 +2321,9 @@ export function App() {
     }
   }, [releaseUnitBookkeeping]);
 
-  /**
-   * 重建一个冷标签（切回时按需触发）：走与导入完全相同的管线
-   * （解析字节 → 适配 → 建工作簿 → 应用特性 → 回放编辑）。
-   *
-   * 三个必须做对的点（见 `M4-多标签内存分析.md`）：
-   *  ① 重建后**清掉 Univer 的撤销栈**：它不会随 dispose 清理，沿用原 unitId 会让 Ctrl+Z 把旧模型的
-   *     mutation 打到新模型上；②我们自己的历史账本按 unitId 切断同类条目；③重建期间置 busy，避免用户在
-   *     解析的这段时间里操作一个还不存在的模型。
-   */
+  /** 重建一个冷标签：走与导入完全相同的管线（解析 → 适配 → 建簿 → 应用特性 → 回放编辑）。
+   * ① 重建后必须**清掉 Univer 的撤销栈**（不随 dispose 清理，沿用原 unitId 会让 Ctrl+Z 把旧模型的
+   * mutation 打到新模型上）；② 历史账本按 unitId 切断同类条目；③ 重建期间置 busy */
   const buildTabUnit = useCallback(async (id: string): Promise<boolean> => {
     const api = apiRef.current;
     const tab = tabsDataRef.current.find((item) => item.id === id) ?? null;
@@ -2754,10 +2371,7 @@ export function App() {
   /** 切换到某个标签：冷标签先重建，再设为当前单元并重装锁与元信息 */
   const activateTab = useCallback(
     (id: string) => {
-      /**
-       * 走串行闸（见 `unitOpsRef` 的说明）：冷标签切换要重建工作簿，绝不能和"打开文件/会话恢复"并行。
-       * 顺序也顺带变直了：先 `await` 重建，成功后再切；不再"先切过去、后面再补建"。
-       */
+      /** 走串行闸：冷标签切换要重建工作簿，不能和"打开文件/会话恢复"并行；先 await 重建、成功后再切 */
       void runUnitOp('activate-tab', async () => {
         if (needsBuild(tabRuntimeRef.current, id)) {
           const ok = await buildTabUnit(id);
@@ -2767,8 +2381,7 @@ export function App() {
           }
         }
         clearSwapFlashRef.current(); // 黄色提醒框属于上一张表的坐标系，切表即收掉
-        // 切走之前先把**即将离开的那个标签**的编辑落一次（此时 active 还是它）。
-        // 冷存发生在切走之后，那时再读"活动簿"就读错对象了（实测踩过）。
+        // 切走前先把即将离开的标签的编辑落一次（冷存发生在切走之后，那时再读"活动簿"就读错对象了）
         snapshotActiveEditsRef.current();
         try {
           instanceServiceRef.current?.setCurrentUnitForType(id);
@@ -2809,11 +2422,8 @@ export function App() {
       }
       snapshotActiveEditsRef.current(); // 关闭前先落一次编辑（导出的脏格账本与之一致）
       /**
-       * **关掉最后一个标签：必须"先摆占位、再释放"**（顺序反了就是用户报的白屏）。
-       *
-       * 原因见 `restorePlaceholderUnit`：唯一的活动单元被释放后，Univer 会把当前单元置成 `null`
-       * 并把 canvas 摘掉；渲染根一旦被回收，之后**新建工作簿也画不回来**（实测），只能刷新。
-       * 所以趁旧单元还活着，先把占位单元建成当前单元，再释放它 —— 全程至少有一个单元。
+       * **关掉最后一个标签必须"先摆占位、再释放"**（顺序反了就是白屏）：唯一的活动单元被释放后，
+       * Univer 会把当前单元置成 `null` 并摘掉 canvas，渲染根被回收后新建工作簿也画不回来，只能刷新。
        */
       const isLastTab = tabsDataRef.current.length === 1;
       if (isLastTab) restorePlaceholderRef.current('last-tab-closing');
@@ -2853,14 +2463,10 @@ export function App() {
   const editsByTabRef = useRef<Map<string, Map<string, SessionTabEdit>>>(new Map());
 
   /**
-   * 把某个工作簿设为"焦点单元"。
-   *
-   * 为什么不能只用 `setCurrentUnitForType`（实测教训）：Univer 的**滚轮滚动**在
-   * `SheetsScrollRenderController._wheelEventListener` 里第一行就是
-   * `if (evt.ctrlKey || !contextService.getContextValue(FOCUSING_SHEET)) return;`
-   * ——而 `FOCUSING_SHEET` 这个上下文标记**只有 `IUniverInstanceService.focusUnit()` 会置位**。
-   * 只切"当前单元"不设焦点标记时，滚轮等于完全失灵（用户实测："滚动条无法正常使用"）。
-   * 单元格编辑器/公式栏（docs 单元）拿焦点又会把它置回 false，所以在表格里按下指针时要重新置位。
+   * 把某个工作簿设为"焦点单元"。不能只用 `setCurrentUnitForType`：Univer 的滚轮滚动在
+   * `SheetsScrollRenderController._wheelEventListener` 首行就检查 `FOCUSING_SHEET`，
+   * 而这个标记**只有 `IUniverInstanceService.focusUnit()` 会置位**，不置位滚轮完全失灵。
+   * 编辑器/公式栏（docs 单元）拿焦点会把它置回 false，所以在表格里按下指针时要重新置位。
    */
   const focusSheetUnit = useCallback((id: string | null) => {
     if (!id) return;
@@ -2871,37 +2477,16 @@ export function App() {
     }
   }, []);
 
-  /**
-   * 舞台主画布还在不在。
-   *
-   * 为什么值得单独判：**把最后一个单元 `disposeUnit` 掉之后，容器里连 canvas 都会没有**
-   * （实测 `canvasCount: 0`），这时"切当前单元"是空动作 —— 没有渲染根可切。
-   */
+  /** 舞台主画布还在不在：disposeUnit 掉最后一个单元后容器里连 canvas 都没了，那时"切当前单元"是空动作 */
   const hasSheetCanvas = (): boolean => document.querySelector(`#${CONTAINER_ID} canvas`) !== null;
 
   /**
-   * **摆回"占位单元"**：Univer 里必须**始终至少有一个单元**，否则渲染根会被一起回收。
-   *
-   * 用户给的复现路径（实测已复现，就是他说的白屏）：
-   *   打开文件 → 等备份落盘 → 刷新（会话还原）→ **把还原出来的那个标签关掉** → 再打开文件 ⇒ 白屏。
-   *
-   * 实测到的机制（每一条都是打日志量出来的）：
-   *   ① 关掉最后一个标签 → 唯一的活动单元被释放 → **当前单元变成 `null`** → 容器里的 canvas 被摘掉
-   *      （`canvasCount: 0`），舞台立刻全白；
-   *   ② 同时 Univer 的公式栏开始抛 `Cannot read properties of null (reading 'activeSheet$')`；
-   *   ③ 之后打开新文件，**模型全对**（状态栏连"解析 3ms / 渲染 15ms"都打出来了，`unit === tab`），
-   *      但画布回不来：自愈会记 `render:rebind` → 再记 `render:rebind-failed`。
-   *      **关键**：这时候就算新建工作簿也救不回来（实测新建之后 canvas 仍然是 0）——
-   *      渲染根一旦被回收，JS 这边只能靠重新引导（也就是刷新）。
-   *   ④ 启动时之所以没这个问题：那时摆着"示例工作簿"（`p0-workbook`）这个占位单元。
-   *
-   * 所以唯一的可靠修法是**不让单元数走到 0**：关最后一个标签时，**先**把占位单元建好并切成当前单元，
-   * **再**释放那个标签的单元（见 `closeTab`）。摆上之后舞台回到"刚打开工具"的样子，也就能继续开新文件。
-   *
-   * @param reason
-   *  - `last-tab-closing`：即将关掉最后一个标签（**在释放之前**调用；不检查标签账本）
-   *  - `empty-tabs`：标签已经是空的（兜底，正常不会走到）
-   *  - `dead-render-root`：容器里连 canvas 都没有了（尽力而为：实测这种状态救不回来，只留证据）
+   * **摆回"占位单元"**：Univer 必须始终至少有一个单元，否则渲染根会被一起回收。
+   * 复现：打开文件 → 刷新（会话还原）→ 关掉还原出来的标签 → 再打开文件 ⇒ 白屏（当前单元变 null、
+   * canvas 被摘掉，此后模型全对但画布回不来，新建工作簿也救不回来）。所以关最后一个标签时要先建好
+   * 占位单元并切成当前单元、再释放。
+   * @param reason `last-tab-closing` 关最后一个标签前调用；`empty-tabs` 标签已空（兜底）；
+   *   `dead-render-root` 容器里连 canvas 都没了（尽力而为，这种状态救不回来，只留证据）
    */
   const restorePlaceholderUnit = useCallback(
     (reason: 'last-tab-closing' | 'empty-tabs' | 'dead-render-root'): boolean => {
@@ -2911,9 +2496,8 @@ export function App() {
       if (reason === 'dead-render-root' && hasSheetCanvas()) return false;
       try {
         /**
-         * 已经有一个占位簿时就**只把它切成当前单元**，不再新建：
-         * 会话恢复那一瞬间 `tabs` 也可能是空的，这期间可能已经摆过一个（见下面的兜底 effect），
-         * 同一个 id 建两份会让 `disposeSampleWorkbook` 只放掉其中一份，留下"看不见的常驻工作簿"。
+         * 已有占位簿时只切成当前单元、不再新建：会话恢复期间可能已经摆过一个，
+         * 同 id 建两份会让 `disposeSampleWorkbook` 只放掉其中一份，留下"看不见的常驻工作簿"。
          */
         const existing = api.getWorkbook(SAMPLE_WORKBOOK_ID);
         if (!existing) {
@@ -2937,22 +2521,10 @@ export function App() {
   const restorePlaceholderRef = useRef(restorePlaceholderUnit);
   restorePlaceholderRef.current = restorePlaceholderUnit;
 
-  /**
-   * **兜底自愈**：确认"活动标签 = 画布上真正渲染的那个工作簿"，不是就重新绑一次。
-   *
-   * 用户反馈"打开文件后页面是空白的，刷新后又会出现"—— 这一类现象的共同点都是
-   * **活动单元与渲染单元错位**（并发建簿、浏览器把标签冻结/丢弃后再激活、渲染单元被提前释放…）。
-   * 刷新之所以能好，是因为恢复路径每次都是"干净地重建 + 绑定"。
-   *
-   * 与其猜是哪一条触发，不如在每次"会动工作簿"的操作结束后**验一次、不对就修**：
-   *  ① 先**等一会儿再判**（最多 `RENDER_SETTLE_MS`，逐帧轮询）：绘制是异步的，给首帧留时间；
-   *  ② 真的不对 → 重绑（`setCurrentUnitForType` + 聚焦 + 重挂表依赖，与切标签同款动作），
-   *     并 `window.dispatchEvent(new Event('resize'))` **催一次布局**：Univer 的 canvas 尺寸靠
-   *     容器尺寸通知驱动，若绑定发生时容器正好是 0 宽/被隐藏，不补这一次通知它就一直 0×0（舞台空白）；
-   *  ③ 再等 `RENDER_REBIND_MS` 复验，仍不对才记 `render:rebind-failed`（按 F5 也能靠会话恢复回来）。
-   *
-   * 健康路径**零开销**：第一次测量就通过 → 不 await、不打日志、不做任何多余动作。
-   */
+  /** **兜底自愈**：确认"活动标签 = 画布上真正渲染的那个工作簿"，不是就重绑一次。"页面空白、刷新后
+   * 又出现"的共同点都是活动单元与渲染单元错位（并发建簿、标签被冻结后激活…）。
+   * ① 先等一会儿再判（`RENDER_SETTLE_MS`，逐帧轮询）；② 不对就重绑 + `resize` 催布局（canvas 尺寸
+   * 靠容器尺寸通知驱动，绑定发生在容器 0 宽时不补通知就一直 0×0）；③ 再等 `RENDER_REBIND_MS` 复验 */
   const ensureActiveUnitRendered = useCallback(
     async (id: string): Promise<boolean> => {
       const measure = (): { ok: boolean; active: string | null; canvasWidth: number } => {
@@ -2982,11 +2554,7 @@ export function App() {
       if (first.ok) return true;
       log('render:rebind', { id, active: first.active, canvasWidth: first.canvasWidth });
       try {
-        /**
-         * **渲染根整个没了**（容器里连 canvas 都没有，例如"最后一个标签被关掉"）：
-         * 这时候切当前单元是空动作，得先用占位单元把渲染根拉起来，再切到目标单元。
-         * 不补这一步，自愈就只会一路记 `render:rebind-failed`（用户看到的就是怎么点都不出画面）。
-         */
+        /** **渲染根整个没了**（容器里连 canvas 都没有）：先用占位单元把渲染根拉起来，再切目标单元 */
         if (!hasSheetCanvas()) restorePlaceholderUnit('dead-render-root');
         instanceServiceRef.current?.setCurrentUnitForType(id);
         focusSheetUnit(id);
@@ -2998,11 +2566,7 @@ export function App() {
       const after = await settle(RENDER_REBIND_MS);
       if (!after.ok) {
         log('render:rebind-failed', { id, active: after.active, canvasWidth: after.canvasWidth });
-        /**
-         * 诚实兜底：渲染根被回收之后，JS 这边**救不回来**（实测新建工作簿也没用），
-         * 只有重新引导（刷新）能恢复。与其让用户对着白舞台反复点，不如直接说清楚 ——
-         * 数据都在本机（会话在 IndexedDB 里），刷新不会丢。
-         */
+        /** 诚实兜底：渲染根被回收后 JS 救不回来（新建工作簿也没用），只有刷新能恢复；数据在本机不会丢 */
         if (!hasSheetCanvas()) toast('画面没能恢复，请按 F5 刷新页面（已打开的文件与编辑不会丢）', 'warn');
       }
       return after.ok;
@@ -3010,13 +2574,8 @@ export function App() {
     [attachSheetDeps, focusSheetUnit, restorePlaceholderUnit, toast],
   );
 
-  /**
-   * **兜底：标签从"有"变成"没有"之后再确认一次占位单元还在**（主路径见 `closeTab`，那里是"先摆后放"）。
-   *
-   * 只在**真的开过标签**之后才动手（`hadTabsRef`）：
-   * 启动与"会话恢复还没跑完"的那一瞬间 `tabs` 也是空的，那时候去摆一个占位簿会多出一份
-   * 谁也管不着的工作簿（实测会让 `disposeSampleWorkbook` 只放掉其中一份）。
-   */
+  /** **兜底：标签从"有"变成"没有"后再确认一次占位单元还在**（主路径见 `closeTab` 的"先摆后放"）。
+   * 只在真的开过标签后才动手：启动与会话恢复没跑完时 `tabs` 也是空的，那时摆占位簿会多出一份没人管的簿 */
   useEffect(() => {
     if (tabs.length > 0) {
       hadTabsRef.current = true;
@@ -3031,13 +2590,8 @@ export function App() {
     }
   }, [tabs.length, restorePlaceholderUnit]);
 
-  /**
-   * 把**指定标签**上被改过的单元格读出来，累积进 `editsByTab`。
-   *
-   * 一定要按 **id** 取工作簿，而不是 `getActiveWorkbook()`：
-   * 冷存发生在我们**已经切走之后**，那时"当前单元"已经是新标签了——
-   * 早先按活动簿读，结果被冷存的标签一个编辑都没记下，切回来是空的（实测踩过）。
-   */
+  /** 把**指定标签**上被改过的单元格读出来累积进 `editsByTab`。必须按 **id** 取工作簿：冷存发生在
+   * 切走之后，`getActiveWorkbook()` 已是新标签，按活动簿读会让被冷存的标签一个编辑都没记下 */
   const snapshotEditsFor = useCallback((workbookId: string) => {
     const workbook = apiRef.current?.getWorkbook(workbookId) ?? null;
     if (!workbook) return 0;
@@ -3097,13 +2651,8 @@ export function App() {
     return applied;
   }, []);
 
-  /**
-   * 标签被冷存/重建后重置撤销与历史。
-   *
-   * 为什么必须做：Univer 的撤销栈**不会**随 `disposeUnit` 清理（上游只在显式调用时删），
-   * 沿用同一个 unitId 重建而不清栈，用户按 Ctrl+Z 会把"旧模型的 mutation"打到"新解析出来的干净模型"上。
-   * 我们自己的历史账本是全局一条（不是按标签分桶），栈清了它也必须清，否则跳步会作用于别的表。
-   */
+  /** 标签被冷存/重建后重置撤销与历史。撤销栈**不随 disposeUnit 清理**，沿用同一 unitId 重建而不清栈，
+   * Ctrl+Z 会把旧模型的 mutation 打到新模型上；历史账本是全局一条，栈清了它也必须清 */
   const clearUndoRedoFor = useCallback((id: string) => {
     try {
       undoRedoServiceRef.current?.clearUndoRedo?.(id);
@@ -3156,11 +2705,8 @@ export function App() {
     async (file: File) => {
       const api = apiRef.current;
       if (!api) return;
-      /**
-       * **格式校验的唯一入口**：`accept` 只约束文件选择框（用户改成"所有文件"仍能选到别的），
-       * 拖放那条路也有自己的过滤 —— 但两者都收口到这里，保证"打不开的格式"给出的是
-       * 同一句「为什么 + 怎么办」，而不是解压失败的原始报错。
-       */
+      /** **格式校验的唯一入口**：文件选择框的 `accept` 与拖放过滤都收口到这里，
+       * 保证"打不开的格式"给出同一句「为什么 + 怎么办」，而不是解压失败的原始报错 */
       const bridgeStatus = bridgeStatusRef.current;
       const bridgeOnly = isBridgeOnlyFile(file.name);
       if (!isSupportedWorkbookFile(file.name) && !bridgeOnly) {
@@ -3179,15 +2725,10 @@ export function App() {
         setStatusText(`打不开 ${file.name}：${hint}`);
         return;
       }
-      /**
-       * 校验通过后进**串行闸**再动手（见 `unitOpsRef` 的说明）：
-       * 用户在"冷标签正在重建"或"启动恢复还没跑完"时打开文件，两条路径会同时
-       * `createWorkbook` + `attachSheetDeps`，把活动单元与画布绑定搞错位 → 页面空白、刷新才恢复。
-       * 排队后：前一步做完再建新簿，顺序确定，也就不会再错位。
-       */
+      /** 校验通过后进**串行闸**再动手：否则会与"冷标签重建/会话恢复"同时 createWorkbook +
+       * attachSheetDeps，把活动单元与画布绑定搞错位（页面空白、刷新才恢复） */
       await runUnitOp('import', async () => {
-      // 埋点：用户"选中文件"这一刻。配合 import:done 就能算出端到端墙钟时间
-      // （解析/转换/渲染各段耗时已在 summary 里分项记录，这里补的是总时长基准点）
+      // 埋点：用户"选中文件"这一刻，配合 import:done 得到端到端墙钟时间（分段耗时在 summary 里）
       log('import:start', { name: file.name, size: file.size });
       setStatus('importing');
       setStatusText(`正在解析 ${file.name} …`);
@@ -3195,12 +2736,8 @@ export function App() {
         const originalBytes = new Uint8Array(await file.arrayBuffer());
         const t0 = performance.now();
         /**
-         * **统一打开入口**（`src/importer/open-workbook.ts`）：
-         *  - `.xlsx/.xlsm/.xltx/.xltm` → 原字节直接用（导出才能逐字节保真）；
-         *  - `.csv/.tsv/.txt/.ods/.xls` → 自研解析 → 合成一份规范 xlsx（预览/编辑/工作区/撤销全照旧，
-         *    导出会另存为 .xlsx，这条会进导入摘要）；
-         *  - `.xlsb` → **本地版**先借本机 Excel 转成 xlsx（完整保真：样式/条件格式/批注/图片都在），
-         *    再走上面同一条路；静态版在上面已经被拒。
+         * **统一打开入口**（`src/importer/open-workbook.ts`）：OOXML 直接原字节（导出才逐字节保真）；
+         * csv/ods/xls 由自研解析合成规范 xlsx（导出会另存为 .xlsx）；`.xlsb` 只有本地版能先借 Excel 转换。
          */
         let fileBytes: Uint8Array = originalBytes;
         let bridgeNote: string[] = [];
@@ -3244,8 +2781,8 @@ export function App() {
         setActiveTabId(tabId);
         tabRuntimeRef.current = markTabUsed(tabRuntimeRef.current, tabId, Date.now());
         disposeSampleWorkbook();
-        // 显式把新工作簿设为"当前单元"：多标签下 createWorkbook 不足以保证所有内部服务都切过去
-        // （实测：不显式切换时超链接等模型会落到旧单元，读回为空）
+        // 显式设为"当前单元"：多标签下 createWorkbook 不足以保证所有内部服务都切过去
+        // （不显式切换时超链接等模型会落到旧单元，读回为空）
         try {
           instanceServiceRef.current?.setCurrentUnitForType(tabId);
         } catch (error) {
@@ -3253,22 +2790,13 @@ export function App() {
         }
         focusSheetUnit(tabId); // 焦点标记：不设它滚轮就不滚
 
-        // 在装"仅内容可编辑"锁之前，把条件格式/数据验证/超链接/批注/图片应用上去。
-        // 这段时间临时挂起只读闸门：这些应用走的是 Univer 自己的命令，
-        // 而闸门是"默认拒绝"的；这是我们自己的可信代码路径，不是用户编辑。
+        // 装"仅内容可编辑"锁之前先应用特性；期间挂起只读闸门（闸门默认拒绝，而这是我们自己的可信路径）
         const t3 = performance.now();
         guardRef.current?.suspend();
-        /**
-         * 装载期间**关掉历史记账窗口**：应用特性会执行一串 Univer 命令，undos 会分多次增长，
-         * 若不关，"打开文件"这件事就会在账本里留下几条"编辑内容"幽灵条目（用户按 Ctrl+Z 撤不动
-         * 任何看得见的东西，正是反馈里"面板加的数据撤不掉"的观感来源）。
-         */
+        /** 装载期间关掉历史记账：应用特性会连发一串命令，不关会在账本里留下"编辑内容"幽灵条目 */
         pauseAutoEntriesRef.current = true;
-        /**
-         * 同时**暂停脏格记账**：应用特性（尤其超链接会写进单元格的富文本）也会经过 mutation 包装，
-         * 不暂停就会把"我们自己装载时的写入"记成用户改动 —— 表现是**刚打开的文件立刻显示"未保存"**，
-         * 而且导出时会把本来可以原样保留的 XML 当成"改过的格子"去回写。见 `dirty-tracker.ts`。
-         */
+        /** 同时暂停脏格记账：应用特性也会经过 mutation 包装，不暂停会让刚打开的文件立刻显示"未保存"，
+         * 导出时还会把本可原样保留的 XML 当成"改过的格子"回写（见 `dirty-tracker.ts`） */
         pauseDirtyTracking();
         let featureResult: ApplyFeaturesResult;
         try {
@@ -3280,11 +2808,8 @@ export function App() {
         }
         const featureMs = Math.round(performance.now() - t3);
         featureResultRef.current = featureResult;
-        /**
-         * 顺手把这个新单元的撤销栈清空：账本此刻是空的（装载不入账），栈里却躺着特性应用的十几步，
-         * 不清就会出现"账本说没有可撤销的、Univer 却还能撤"的错位（Ctrl+Z 命中这些步 = 什么都没发生）。
-         * 注意只清**栈**、不动账本：账本里可能还有打开这份文件之前的工作区动作。
-         */
+        /** 清空这个新单元的撤销栈：账本此刻是空的，栈里却躺着特性应用的十几步，会错位成
+         * "账本说没得撤、Univer 却还能撤"。只清栈、不动账本（里面可能有之前的工作区动作） */
         try {
           undoRedoServiceRef.current?.clearUndoRedo?.(tabId);
           log('import:undo-stack-cleared', { id: tabId });
@@ -3350,9 +2875,8 @@ export function App() {
 
   /**
    * 组装"当前内容"的 xlsx 字节（外科式：只回写脏格，其余部件字节保留）。
-   *
-   * 保真导出与"交给本机 Excel 另存为其它格式"都用它 —— 桥的输入必须是**当前看到的内容**，
-   * 而不是重新生成的一份，这样连条件格式/图片/图表都能带到 .ods/.xls 里去。
+   * 保真导出与"交给本机 Excel 另存"都用它：桥的输入必须是当前看到的内容而非重新生成的一份，
+   * 这样条件格式/图片/图表才能带到 .ods/.xls 里去。
    */
   const buildCurrentXlsxBytes = useCallback((): { bytes: Uint8Array; editCount: number; sheets: number } | null => {
     const api = apiRef.current;
@@ -3430,10 +2954,8 @@ export function App() {
   }, [buildCurrentXlsxBytes, downloadBytes, toast]);
 
   /**
-   * 交给**本机 Excel** 另存为其它格式（`.ods/.xls/.xlsb`）。
-   *
-   * 为什么走 Excel 而不是第三方库：库只认"值"，字体/填充/边框/条件格式/批注/图片全丢；
-   * Excel 是这些格式的原生实现，另存出来的东西与"人工打开再另存"等价（见 P5 方案 §1）。
+   * 交给**本机 Excel** 另存为其它格式（`.ods/.xls/.xlsb`）。不走第三方库：库只认"值"，
+   * 字体/填充/边框/条件格式/批注/图片全丢；Excel 是这些格式的原生实现，结果与人工另存等价。
    */
   const handleBridgeExport = useCallback(
     async (format: BridgeFormat) => {
@@ -3484,16 +3006,8 @@ export function App() {
     }
   }, [downloadBytes, getSheet, toast]);
 
-  /**
-   * 导出菜单的选项。
-   *
-   * 用户要求："导出按钮的面板进行优化，**无法使用的功能直接隐藏**"。
-   * 所以这里不是"置灰 + 说明"，而是按**当前真的能不能用**决定放不放进来：
-   *   · `.xlsx` 保真导出：要有打开的**文件**（示例表没有原始字节可回写）→ 没有就不出现；
-   *   · `.csv`：只要有工作表就能导（示例表也行）→ 基本一直在；
-   *   · `.ods/.xls/.xlsb`：要**本地版的转换桥**（本机装了 Excel 才可用）→ 不可用就不出现。
-   * 标签也顺手改短（详细说明放右侧提示位），避免一行字把菜单撑得很宽。
-   */
+  /** 导出菜单的选项：按**当前真的能不能用**决定放不放进来（不可用的直接隐藏）。`.xlsx` 保真导出要有
+   * 打开的文件（示例表没有原始字节可回写）；`.csv` 只要有工作表就一直在；`.ods/.xls/.xlsb` 要转换桥 */
   const exportMenuItems = useMemo((): MenuItemSpec[] => {
     const hasFile = tabs.length > 0 && activeTabId !== null;
     const busy = exportBusy !== null;
@@ -3546,17 +3060,8 @@ export function App() {
     pendingWorkspaceClickRef.current = item;
   }, []);
 
-  /**
-   * 在工作区条目上"点一下"（按下后没拖动就松手）。
-   *
-   * 用户要求（第 4 条）：点击互换模式下，**先点工作区条目、再点表格单元格**也要能互换。
-   * 以前只有"点单元格 → 点单元格"这条顺序能累积选中，条目这边只支持拖拽（拖到表格里写回），
-   * 于是"先点条目再点格子"完全没反应。这里把条目登记成互换的一方：
-   *  - 再点同一个条目 → 控制器判为"同一方"，自动取消选中；
-   *  - 再点表格里尺寸相同的格子 → 走 `swapHandlerRef`（与"点格子再点条目"同一条路径）；
-   *  - 尺寸不同 → 控制器给"尺寸不一致"的提示（1×1 条目对多格选区就会命中这条）。
-   * 只有点击互换模式 + 没被闸住时才登记（`select()` 内部也会再判一次，这里只是少做无用功）。
-   */
+  /** 在工作区条目上"点一下"（按下后没拖动就松手）就把它登记成点击互换的一方，让"先点条目、再点表格
+   * 单元格"也能互换；再点同一条目 → 控制器判为同一方并取消；尺寸不同 → 提示"尺寸不一致" */
   const handleWorkspaceItemClick = useCallback((item: RangeSnapshot) => {
     if (modeRef.current !== 'click-swap') return;
     if (!clickSwapRef.current?.isEnabled()) return;
@@ -3573,15 +3078,8 @@ export function App() {
   }, []);
   handleWorkspaceItemClickRef.current = handleWorkspaceItemClick;
 
-  /**
-   * 标记"一次表格动作开始了"（互换/移动/写回/清空/剪切…）。
-   *
-   * 命令执行时 Univer 的 `undos` 计数会先涨一次、订阅随即补一条历史；动作结束后
-   * `pushHistory` 再用我们自己的措辞把这一段**覆盖**掉（见下方说明），
-   * 于是"一次动作 = 一条历史"，撤销的步数才和用户的直觉一致。
-   * 顺带预置标签：万一动作没产生撤销步骤、又没走到 `pushHistory`，也不会串到下一次编辑上
-   * （订阅只认 2 秒内的标签）。
-   */
+  /** 标记"一次表格动作开始了"（互换/移动/写回/清空/剪切…）：命令会让 Univer 的 undos 先涨一次、订阅
+   * 补一条历史，动作结束后 `pushHistory` 用我们的措辞覆盖掉，保证"一次动作 = 一条历史" */
   const beginSheetAction = useCallback((label: string, kind: HistoryKind) => {
     sheetActionRef.current = {
       label,
@@ -3601,13 +3099,8 @@ export function App() {
         at: Date.now(),
         scope,
       };
-      /**
-       * 我们自己执行的表格命令（互换/写回/清空…）会**再**被 Univer 的 undos 计数抓到一次
-       * （订阅里已经补了一条"编辑内容"）。若不合并，一次动作就占两条历史，
-       * 撤销时白白多走一步——实测后果就是"工作区那一步撤不到"（条目数还是 19）。
-       * 这里把**这次动作期间**订阅补出来的那几条收敛成一条，并用我们的措辞命名；
-       * 认领只按 id 精确命中，所以中间夹杂的工作区条目（如"更新工作区条目"）不受影响。
-       */
+      /** 我们执行的表格命令会**再**被 Univer 的 undos 抓到一次，不合并的话一次动作占两条历史、撤销要多
+       * 走一步。这里把这次动作期间补出来的那几条收敛成一条并用我们的措辞命名（认领按 id 精确命中） */
       if (scope === 'sheet') {
         pendingHistoryLabelRef.current = null;
         const action = sheetActionRef.current;
@@ -3659,24 +3152,14 @@ export function App() {
   );
   pushHistoryRef.current = pushHistory;
 
-  /**
-   * 工具栏"撤销/重做"按钮的可用态：以**账本**为准。
-   *
-   * 不能再只看 Univer 的 undos/redos——工作区的动作不在 Univer 的栈里，
-   * 只看它就会出现"明明能撤销工作区操作，按钮却是灰的"（用户反馈的另一半）。
-   */
+  /** 工具栏"撤销/重做"按钮的可用态：必须以**账本**为准——工作区动作不在 Univer 的栈里，只看 undos 按钮会误灰 */
   useEffect(() => {
     setCanUndo(historyIndex > 0);
     setCanRedo(historyIndex < historyEntries.length);
   }, [historyEntries.length, historyIndex]);
 
-  /** 撤销一步（**按时间顺序在表格与工作区之间切换**）。
-   *
-   * 账本（`historyEntries` + `historyIndex`）是唯一的顺序来源：
-   *  - 上一步是工作区动作 → 用我们自己的快照回放（`before`）；
-   *  - 否则交给 Univer 的撤销栈（表格内容）。
-   * 这样"先加了工作区条目、又改了表格"时，Ctrl+Z 先撤表格、再撤工作区，符合直觉。
-   */
+  /** 撤销一步（按时间顺序在表格与工作区之间切换）。账本是唯一顺序来源：
+   * 上一步是工作区动作就用我们的快照回放（`before`），否则交给 Univer 的撤销栈 */
   const stepBack = useCallback(async (): Promise<boolean> => {
     const index = historyIndexRef.current;
     if (index <= 0) return false;
@@ -3731,24 +3214,17 @@ export function App() {
     return Boolean(ok);
   }, [syncSnapshotStore]);
 
-  /**
-   * 全局撤销/重做快捷键的**处理函数**。
-   *
-   * 用户实测两条："鼠标点击工作区后，撤回重做这类快捷键失效"、"工作区的操作撤不掉"。
-   * 前者是因为以前完全依赖 Univer 的快捷键服务（它只在表格拿到焦点时响应）；
-   * 后者还多一层：Univer 的 `ShortcutService` 在 window 的 capture 阶段注册了 Ctrl+Z，
-   * 且**注册顺序在我们之前**，同节点用 `stopPropagation()` 拦不住它——会出现"它先撤一步、
-   * 我们的账本原地不动"。所以转发器由 `main.tsx` 在引导前注册（`src/shell/undo-shortcut.ts`），
-   * 这里只提供处理函数：按账本顺序撤销/重做，并用 `stopImmediatePropagation()` 截下这次按键。
-   * 只有焦点真在单元格编辑器/公式栏/输入框里时才让路（那里撤的是那一格或那个框里的输入）。
-   */
+      /**
+       * 全局撤销/重做快捷键的**处理函数**（转发器由 `main.tsx` 在引导前注册，见 `src/shell/undo-shortcut.ts`）。
+       * 不能依赖 Univer 的快捷键服务（只在表格获焦时响应），且它的 `ShortcutService` 在 window capture
+       * 阶段注册 Ctrl+Z 且早于我们，`stopPropagation()` 拦不住 —— 必须用 `stopImmediatePropagation()`；
+       * 焦点真在编辑器/公式栏/输入框里时让路。
+       */
   useEffect(() => {
     /**
-     * 焦点是不是在**文本编辑**元素里（要在那里让路给原生撤销）。
-     *
-     * 注意不能简单按 `<input>` 判断：导入用的 `<input type="file">`、勾选框、按钮都是 input，
-     * 但都不是"文本编辑"。实测坑：选完文件后焦点还在 file input 上，
-     * 粗规则会让 Ctrl+Z 完全没反应（用户反馈的"快捷键失效"）。
+     * 焦点是不是在**文本编辑**元素里（在那里让路给原生撤销）。不能简单按 `<input>` 判断：
+     * 导入用的 `<input type="file">`、勾选框、按钮都是 input 但不是文本编辑，
+     * 粗规则会让选完文件后的 Ctrl+Z 完全没反应。
      */
     const TEXT_INPUT_TYPES = new Set([
       'text',
@@ -3776,11 +3252,9 @@ export function App() {
       }
       if (!element.closest('[contenteditable="true"], [contenteditable=""]')) return false;
       /**
-       * 可编辑元素还要再分两种，否则会踩坑（实测）：
-       *  - **单元格编辑器/公式栏正在编辑** → 让 Univer 处理 Ctrl+Z（撤的是这一格里的输入）；
-       *  - **Univer 那个隐藏的焦点代理**（为了让表格收到键盘事件而常驻 contenteditable）
-       *    → 这正是"点了工作区/表格之后快捷键失效"的现场：它不是编辑器，必须由我们接管。
-       * 用上下文标记区分：`EDITOR_ACTIVATED` / `FOCUSING_FX_BAR_EDITOR` 为真才算真在编辑。
+       * 可编辑元素要再分两种：**单元格编辑器/公式栏正在编辑** → 让 Univer 撤这一格里的输入；
+       * **Univer 那个常驻的隐藏焦点代理**（contenteditable，用来收键盘事件）→ 必须由我们接管。
+       * 用 `EDITOR_ACTIVATED` / `FOCUSING_FX_BAR_EDITOR` 上下文标记区分。
        */
       try {
         const context = rootInjectorRef.current?.get(IContextService) as
@@ -3806,20 +3280,13 @@ export function App() {
         target: (event.target as HTMLElement | null)?.tagName ?? null,
       });
       if (editing) return; // 输入框/单元格编辑器里让给编辑器自己（撤的是那格里的输入）
-      /**
-       * 账本上确实还有可撤/可重做的步骤时才截下这次按键。
-       * 否则原样放行，让 Univer 的快捷键服务去试（例如账本被截断的极端情况）。
-       */
+      /** 账本上确实还有可撤/可重做的步骤时才截下按键；否则放行让 Univer 的快捷键服务去试 */
       const hasStep = isUndo
         ? historyIndexRef.current > 0
         : historyIndexRef.current < entriesRef.current.length;
       if (!hasStep) return;
       event.preventDefault();
-      /**
-       * **必须**用 `stopImmediatePropagation`：Univer 的 ShortcutService 也在 window 的
-       * capture 阶段监听 Ctrl+Z（注册顺序在我们之前，见 `src/shell/undo-shortcut.ts`）。
-       * 不用它就会出现"Univer 先撤一步、我们再撤一步"或"Univer 撤完、我们的账本原地不动"。
-       */
+      /** 必须用 `stopImmediatePropagation`：Univer 的 ShortcutService 注册在同一阶段且早于我们 */
       event.stopImmediatePropagation();
       void (isUndo ? stepBack() : stepForward());
     };
@@ -3829,9 +3296,7 @@ export function App() {
   stepBackRef.current = stepBack;
   stepForwardRef.current = stepForward;
 
-  /**
-   * 跳步：按账本顺序一步步撤/重做（表格动作走 Univer，工作区动作走我们的快照）
-   */
+  /** 跳步：按账本顺序一步步撤/重做（表格动作走 Univer，工作区动作走我们的快照） */
   const handleJumpTo = useCallback(
     async (target: number) => {
       const plan = planJump(historyIndexRef.current, target);
@@ -3852,13 +3317,7 @@ export function App() {
     [commitWorkspace],
   );
 
-  /**
-   * 批量移除（"只清空筛选出来的那部分"用）。
-   *
-   * 为什么必须是一次原子更新：早先面板里写的是 `for (const item of visible) onRemove(item.id)`，
-   * 一次事件回调里连打 N 次 setState——即便用函数式更新，也平白多出 N 次渲染与 N 条日志；
-   * 而现在这里是**一次**过滤 + 一次状态提交，语义也更清楚（要么都删，要么都不删）。
-   */
+  /** 批量移除（"只清空筛选出来的那部分"用）。必须一次原子更新：逐条调用会打出 N 次渲染与 N 条日志 */
   const removeItems = useCallback(
     (ids: string[]) => {
       if (ids.length === 0) return;
@@ -3880,14 +3339,10 @@ export function App() {
   }, [commitWorkspace]);
 
   /**
-   * 单元格 ↔ 工作区条目互换之后，把"从单元格换出来的内容"落到条目上。
-   *
-   * 用户规则："工作区不放空内容的单元格"（绝对）。而互换是一条**反向**的搬运通道：
-   * 条目内容已经写进单元格，换回来的是**那一格原来的内容**——如果那一格本来就是空的
-   * （空字符串 / 只有空格 / 从没写过），条目就会变成一张**白卡片**，破坏这条规则。
-   * 所以分两种处理：
-   *  - 有内容 → 更新条目（进工作区撤销账本，见 `commitWorkspace`）；
-   *  - 空内容 → **移除条目**（内容一点没丢，它已经在单元格里了；一次 Ctrl+Z 就能还回来）。
+   * 单元格 ⇄ 工作区条目互换后，把"从单元格换出来的内容"落到条目上。
+   * 互换是反向通道：换回来的是那一格原来的内容，若为空，条目会变成白卡片、破坏
+   * "工作区不放空内容单元格"这条规则。所以有内容 → 更新条目；空内容 → **移除条目**
+   * （内容没丢，已经在单元格里，一次 Ctrl+Z 就能还回来）。
    */
   const absorbSwappedCell = useCallback(
     (item: RangeSnapshot, cellSnapshot: RangeSnapshot | null): 'updated' | 'removed' | 'unchanged' => {
@@ -3914,10 +3369,7 @@ export function App() {
     [commitWorkspace, log, removeItem],
   );
 
-  /* ------------------------------------------------------------------ 剪贴板
-   * 工作区条目的「复制 / 剪切」把内容放进内部剪贴板，再「粘贴」到表格：
-   * 粘贴只写内容、保留目标格格式（与拖拽写回同一条路径 applySnapshot）。
-   * ------------------------------------------------------------------ */
+  /* ---- 剪贴板：工作区条目的「复制/剪切」放进内部剪贴板，「粘贴」到表格时只写内容、保留目标格格式 ---- */
 
   const copyItem = useCallback(
     (item: RangeSnapshot, cut: boolean) => {
@@ -3973,14 +3425,10 @@ export function App() {
   );
 
   /**
-   * 拖分隔条改工作区宽度（同时也是"表格区域宽度"）：往左拖变宽。
-   *
-   * 两句额外的话（审计查出来的两处"能漏 listener"的口子）：
-   *  - 必须也监听 `pointercancel`：触控/手写笔手势被浏览器取消、或指针在别处被吞掉时
-   *    不会再有 `pointerup`，只监听 pointerup 的话这两个监听会赖在 window 上，
-   *    期间每次 pointermove 都会 setState 重渲染（表现为"拖完还一直卡"）。
-   *  - 卸载时（HMR/Fast Refresh）要把**进行中**的这两个监听摘掉：它们不在任何 effect 里，
-   *    闭包还抓着 `updateSettings`，否则会一直引用旧实例的 setState。
+   * 拖分隔条改工作区宽度（同时也是表格区域宽度）：往左拖变宽。
+   * ① 必须同时监听 `pointercancel`：手势被取消时不会再发 pointerup，只监听 pointerup 会让
+   * 监听赖在 window 上，每次 pointermove 都 setState 重渲染（表现为"拖完还一直卡"）；
+   * ② 卸载时要把进行中的监听摘掉（它们不在 effect 里，闭包抓着 `updateSettings`）。
    */
   const startSidebarResize = useCallback(
     (event: React.PointerEvent<HTMLDivElement>) => {
@@ -4023,7 +3471,7 @@ export function App() {
     return () => window.removeEventListener('keydown', onKey, true);
   }, [wsClearConfirming]);
 
-  /** Ctrl/Cmd+V：剪贴板里有工作区内容时优先粘贴（挂在 window 捕获阶段，先于表格原生粘贴） */
+  /** 挂在 window 捕获阶段，先于表格原生粘贴 */
   useEffect(() => {
     window.addEventListener('keydown', handleClipboardKey, true);
     return () => window.removeEventListener('keydown', handleClipboardKey, true);
@@ -4071,8 +3519,7 @@ export function App() {
       const { snapshot: cellSnapshot } = extractSnapshot(sheet, cellSide.a1);
       beginSheetAction(`与工作区「${item.label}」互换`, 'swap');
       applySnapshot(sheet, item, { row: rect.startRow, col: rect.startColumn });
-      // 条目内容变了 → 同样进工作区的撤销账本（用户要求"工作区操作也要能撤回"）；
-      // 换出来的是空格子 → 直接移除条目，工作区里不留白卡片（见 absorbSwappedCell）
+      // 条目内容变了 → 进工作区撤销账本；换出来是空格子 → 移除条目（见 absorbSwappedCell）
       const absorbed = absorbSwappedCell(item, cellSnapshot);
       toast(
         absorbed === 'removed'
@@ -4122,14 +3569,8 @@ export function App() {
     setImportOpen(true);
   }, []);
 
-  /**
-   * 把选区补齐到**整块合并单元格**（返回补齐后的矩形与"是否扩过"）。
-   *
-   * 用户实测："选择多个后右键剪切到工作区，剪切的内容并非是我选中的那部分"——
-   * 原因是课程表里满是合并块：拖选 B4:F8 时 Univer 已把模型选区扩成 B4:F11（第 9~11 行是竖向合并），
-   * 剪切自然剪走整块。这里把补齐规则显式化，并在补齐后**同步选区 + 提示用户**，
-   * 让"高亮看到的"和"实际被操作的"必然一致。
-   */
+  /** 把选区补齐到**整块合并单元格**（返回补齐后的矩形与"是否扩过"）：课程表里满是合并块，拖选
+   * B4:F8 时 Univer 已把模型选区扩成 B4:F11，剪切会剪走整块；补齐后同步选区 + 提示保证所见即所得 */
   const normalizeRangeToMerges = useCallback(
     (sheet: FWorksheet, rect: { startRow: number; startColumn: number; endRow: number; endColumn: number }) => {
       try {
@@ -4153,9 +3594,8 @@ export function App() {
       const sheet = getSheet();
       if (!sheet) return;
       event.preventDefault();
-      // 必须同时阻断传播：本监听挂在容器**捕获阶段**，若不 stop，事件会继续下传到 canvas，
-      // Univer 自带右键菜单也会弹出并盖在我们菜单上面（实测 Playwright 报
-      // "univer-... <button> intercepts pointer events"，用户同样点不动）。
+      // 必须同时阻断传播：本监听挂在容器捕获阶段，不 stop 的话事件继续下传到 canvas，
+      // Univer 自带的右键菜单会弹出来盖住我们的菜单（用户点不动我们的项）
       event.stopPropagation();
       event.stopImmediatePropagation();
 
@@ -4165,9 +3605,8 @@ export function App() {
       let text = '';
       let note: string | null = null;
       /**
-       * 右键要作用在**全部**选区上（Ctrl+点选可能有多块）。
-       * `a1List` 是规范化后的区域表（去重、被包含的小块丢掉）；`a1` 仍保留"主区域"，
-       * 供"与工作区互换/粘贴"这类天然只有一方的操作用（多块时它们会被禁用并说明原因）。
+       * 右键作用在**全部**选区上（Ctrl+点选可能有多块）。`a1List` 是规范化后的区域表；
+       * `a1` 保留"主区域"，供"与工作区互换/粘贴"这类只支持单块的操作（多块时禁用并说明原因）。
        */
       let a1List: string[] = [];
       try {
@@ -4177,14 +3616,7 @@ export function App() {
         let expandedAny = false;
         for (const candidate of liveList) {
           const live = sheet.getRange(candidate).getRange();
-          /**
-           * 与合并单元格对齐（用户实测："剪切的内容并非是我选中的那部分"）。
-           *
-           * 课程表里到处是合并块：用户拖选 B4:F8，Univer 会把模型选区扩成整块（B4:F11），
-           * 于是剪走的是整块——但用户以为自己只选了 F8 那一列。
-           * 这里主动补齐（**每一块都要补**）并把选区同步成补齐后的范围，再明确提示"已按整块处理"，
-           * 保证"看到的 = 被操作的"。
-           */
+          /** 与合并单元格对齐：每一块都要补，保证"看到的 = 被操作的"（见 normalizeRangeToMerges） */
           const { rect, expanded } = normalizeRangeToMerges(sheet, live);
           if (expanded) expandedAny = true;
           rects.push(rect);
@@ -4257,8 +3689,8 @@ export function App() {
         separatorBefore: true,
       },
       {
-        // 单块走 Univer 原生复制：同时写 TSV 与带格式的 HTML（字体/底色/边框/合并/列宽都会跟过去）；
-        // 多块只认纯文本（原生复制只取"最后一个选区"，会丢块），所以标签里如实分开写。
+        // 单块走 Univer 原生复制（同时写 TSV 与带格式 HTML，字体/底色/边框/合并/列宽都会跟过去）；
+        // 多块只认纯文本——原生复制只取"最后一个选区"，会丢块，所以标签里如实分开写
         id: 'copy',
         label: multi
           ? `复制内容（${blocks} 块 / ${totalCells(normalizeRanges(snapshot.a1List))} 格，纯文本）`
@@ -4286,8 +3718,7 @@ export function App() {
   const handleMenuSelect = useCallback(
     (id: string) => {
       log('menu:select', { id });
-      // 注意：ContextMenu 把回调存在 ref 里（首帧绑一次），闭包捕获的 menu 会是旧值，
-      // 因此这里必须从 ref 读当前菜单，不能直接用 state（实测踩过：动作静默不生效）
+      // ContextMenu 把回调存在 ref 里（首帧绑一次），闭包捕获的 menu 是旧值 → 必须从 ref 读当前菜单
       const snapshot = menuRef.current?.snapshot ?? null;
       const sheet = getSheet();
       menuRef.current = null;
@@ -4306,10 +3737,7 @@ export function App() {
           log('workspace:add', { a1: list.join(' '), mode: 'copy', blocks: list.length });
           return;
         }
-        /**
-         * 剪切：把每一块的内容清空（保留格式）。**每块各记一条历史**——它们是各自独立的
-         * mutation，账本如实记录，撤销就是逐块回来（比"一条历史对应多块 mutation"更不容易出错）。
-         */
+        /** 剪切：逐块清空内容（保留格式）。每块各记一条历史——它们是各自独立的 mutation，撤销逐块回来 */
         let cleared = 0;
         for (const ref of list) {
           beginSheetAction(`剪切 ${ref} 到工作区`, 'swap');
@@ -4359,19 +3787,10 @@ export function App() {
       if (id === 'copy') {
         const list = snapshot.a1List.length > 0 ? snapshot.a1List : [snapshot.a1];
         /**
-         * 单块：交给 **Univer 原生复制**（`univer.command.copy`）。
-         *
-         * 为什么换成它（而不是继续自己拼 TSV）：原生复制会同时写两种口味——
-         *  - `text/plain`：TSV（与原来的效果一致，仍是**显示值**）
-         *  - `text/html`：`<table>` + 内联样式，实测带出字体/字号/加粗/字色/底色/四边框/
-         *    对齐/合并(rowspan,colspan)/列宽(`<colgroup>`)/行高，还能被 Excel 认出
-         *    （外面那层 `<google-sheets-html-origin>` 就是给 Excel / 在线表格看的）
-         *
-         * 另外它在**没有 Clipboard API** 的环境（`http://局域网IP`）会自动降级到
-         * `execCommand('copy')`，比我们原来的 `navigator.clipboard?.writeText()` 更稳
-         * （后者在那种环境是**静默失败**：不写剪贴板、也不提示）。
-         *
-         * 失败时（命令被拦/无选区）退回纯文本路径，不让用户"点了没反应"。
+         * 单块交给 **Univer 原生复制**（`univer.command.copy`）：它同时写 `text/plain`（TSV，显示值）
+         * 与 `text/html`（`<table>` + 内联样式，能带出字体/底色/边框/合并/列宽，Excel 也认）。
+         * 在没有 Clipboard API 的环境（http://局域网IP）它会自动降级到 `execCommand('copy')`，
+         * 比 `navigator.clipboard.writeText()` 稳（后者在那类环境会静默失败）。失败时退回纯文本路径。
          */
         if (list.length === 1) {
           const commandService = sheet.getInject().get(ICommandService);
@@ -4391,12 +3810,8 @@ export function App() {
           );
           return;
         }
-        /**
-         * 多块：原生复制只认"最后一个选区"（源码里是 `getCurrentLastSelection()`），
-         * 会把其它块丢掉，所以多块仍走纯文本：块与块之间**空一行**分隔
-         * （与 Excel 多区域复制的习惯一致，这样粘到别处仍能看出"这是几块"）。
-         * 代价是多块不带格式 —— 菜单标签里已如实写明"纯文本"。
-         */
+        /** 多块仍走纯文本：原生复制只认"最后一个选区"（`getCurrentLastSelection()`），会丢块。
+         * 块与块之间空一行分隔（与 Excel 多区域复制一致）；代价是不带格式，菜单标签已写明 */
         void copyPlainTextToClipboard(sheet, list, toast);
         return;
       }
@@ -4436,17 +3851,9 @@ export function App() {
     },
     [addWorkspaceItems, commitWorkspace, getSheet, pasteClipboardAt, pushHistory, stepBack, stepForward, toast],
   );
-  /**
-   * 面板提交：按 行/列/区域（**可多块**）取出内容 → 自动跳过空内容单元格（固定行为）→ 放入工作区。
-   *
-   * 多块是自己人写的（面板已用 `parseRangeList` 识别并规范化），所以这里直接按空格切回区域表，
-   * **一次提交**把所有块拆出来的格子放进去（一条历史，撤销一次回到原状）。
-   *
-   * `keepSource=false`（面板里取消勾选"加入工作区后保留表格内容"）＝**剪切**：
-   * 先提交工作区（内容先进工作区，任何时刻都不会丢），再逐块清空源内容。
-   * 顺序很关键：撤销时**先回滚表格内容、再回滚工作区**，用户永远不会遇到"内容既不在表里也不在工作区"。
-   * 每块各记一条历史（与右键「剪切」完全同一套通道：beginSheetAction + clearRange + pushHistory）。
-   */
+  /** 面板提交：按 行/列/区域（可多块）取出内容 → 跳过空内容单元格 → 放入工作区（一次提交，一条历史）。
+   * `keepSource=false` 即剪切：**先提交工作区、再逐块清空源内容**，顺序反了会出现"内容既不在表里
+   * 也不在工作区"的窗口；每块各记一条历史，与右键「剪切」同一套通道 */
   const handleImportSubmit = useCallback(
     ({ kind, value, keepSource }: { kind: ImportTargetKind; value: string; keepSource: boolean }) => {
       const sheet = getSheet();
@@ -4517,8 +3924,7 @@ export function App() {
     if (hint === 'swap') return '松开即互换内容（双方格式保持不变）';
     if (hint === 'paste') return '松开即写入内容（保留目标格式）';
     if (hint === 'workspace') return '松开即暂存到工作区（可随时拖回表格）';
-    // 不用"此处不能放置"这种否定式措辞：用户反馈它既难看又容易误解（拖到工作区时也出现过）。
-    // 改成"告诉你现在能做什么"的正向提示。
+    // 用"告诉你现在能做什么"的正向措辞："此处不能放置"这类否定式提示容易被误解
     if (hint === 'reject') return '这里放不了：拖到单元格上互换，或拖到右侧工作区暂存';
     return '拖到目标单元格，或拖到右侧工作区暂存';
   }, [dragging, hint]);
@@ -4574,7 +3980,7 @@ export function App() {
         <main className="stage">
           <div id={CONTAINER_ID} ref={containerRef} />
           {status !== 'ready' && status !== 'importing' ? <div className="stage-overlay">{statusText}</div> : null}
-          {/* 把 Excel 工作簿拖到窗口上时的提示（真的能松手打开；以前提示写了"拖入"却没有处理） */}
+          {/* 把 Excel 工作簿拖到窗口上时的提示（松手即打开） */}
           {fileDropActive ? (
             <div className="file-drop-overlay" data-testid="file-drop-overlay">
               <div className="file-drop-card">
@@ -4790,7 +4196,7 @@ export function App() {
         </section>
       ) : null}
 
-      {/* 右键菜单（⑦）：动作只含"允许的操作"，样式/结构类一律不提供 */}
+      {/* 右键菜单：动作只含"允许的操作"，样式/结构类一律不提供 */}
       <ContextMenu
         open={menu !== null}
         x={menu?.x ?? 0}
@@ -4810,14 +4216,14 @@ export function App() {
         onClose={() => setExportMenu(null)}
       />
 
-      {/* 历史记录（⑤）：列出我们自己的动作，可跳回任意一步（连续撤销/重做实现） */}
+      {/* 历史记录：列出我们自己的动作，可跳回任意一步（靠连续撤销/重做实现） */}
       <HistoryPanel
         open={historyOpen}
         entries={historyEntries}
         current={historyIndex}
         available={{
-          // Univer 的状态计数对"我们自己 push 的撤销项"会少报（实测：互换后 undos 仍为旧值），
-          // 因此用历史自身的位置作为可达性下限，避免面板把可达的跳步误判为不可达
+          // Univer 的状态计数对"我们自己 push 的撤销项"会少报，因此用历史自身的位置作为可达性下限，
+          // 避免面板把可达的跳步误判为不可达
           undos: Math.max(undoRedoCounts.undos, historyIndex),
           redos: Math.max(undoRedoCounts.redos, Math.max(0, historyEntries.length - historyIndex)),
         }}
@@ -4847,10 +4253,8 @@ export function App() {
 
 /**
  * 把若干区域以**纯文本 TSV** 写进系统剪贴板（多块之间空一行分隔）。
- *
- * 两条路径都走它：① 多块选区（原生复制只认最后一个选区，会丢块）；② 单块时原生复制失败后的兜底。
- * 抽出来的另一个原因：**成功/失败必须如实告诉用户**——以前这里用
- * `navigator.clipboard?.writeText()`，在 http 局域网下整条链短路，既不写也不提示（静默失败）。
+ * 多块选区与"单块原生复制失败"的兜底都走它。成功/失败必须如实告诉用户：
+ * `navigator.clipboard.writeText()` 在 http 局域网下会整条链短路（既不写也不提示）。
  */
 async function copyPlainTextToClipboard(
   sheet: FWorksheet,
@@ -4880,9 +4284,8 @@ function formatDetail(detail: unknown): string {
 }
 
 /**
- * 把 Univer 取回的原始值收敛成导出器认识的字面量。
- * 富文本单元格的 `getRawValue()` 可能返回富文本对象，直接写进 xlsx 会变成 "[object Object]"，
- * 因此这里取纯文本；实在无法收敛的一律降级为 null（清空内容）而不是写出垃圾值。
+ * 把 Univer 取回的原始值收敛成导出器认识的字面量：富文本单元格的 `getRawValue()` 可能返回
+ * 富文本对象，直接写进 xlsx 会变成 "[object Object]"，所以取纯文本；无法收敛的降级为 null。
  */
 function normalizeExportValue(value: unknown): CellEdit['value'] {
   if (value === null || value === undefined) return null;
@@ -4895,8 +4298,8 @@ function normalizeExportValue(value: unknown): CellEdit['value'] {
 
 // ================================================================ 测试钩子
 /**
- * 保留 P0 已建立的 `window.__p0` 契约（Playwright 依赖它），并扩展 P2 需要的能力。
- * 这些钩子只做"读状态 / 调业务函数"，不模拟 UI，避免测试与实现耦合。
+ * `window.__p0` 是 Playwright 依赖的测试契约（`window.__app` 为别名）。
+ * 钩子只做"读状态 / 调业务函数"，不模拟 UI，避免测试与实现耦合。
  */
 interface TestHooksDeps {
   apiRef: { current: FUniver | null };
@@ -4956,7 +4359,7 @@ function installTestHooks(deps: TestHooksDeps): void {
   const { apiRef, getSheet } = deps;
 
   const hooks = {
-    // ---- P0 既有契约 ----
+    // ---- 既有契约 ----
     log: p0log,
     clearLog,
     countKind,
@@ -4976,7 +4379,7 @@ function installTestHooks(deps: TestHooksDeps): void {
       apiRef.current?.getActiveWorkbook()?.getSheetByName(name)?.activate();
     },
     getImportSummary: () => deps.summaryRef.current,
-    /** P1：条件格式/数据验证/超链接/批注/图片的应用结果 */
+    /** 条件格式/数据验证/超链接/批注/图片的应用结果 */
     getFeatureReport: () => deps.featureResultRef.current,
     /** 只读闸门：被拦下的命令及次数（用于验证"样式/结构/对象改不动"） */
     getBlockedCommands: () =>
@@ -4987,12 +4390,7 @@ function installTestHooks(deps: TestHooksDeps): void {
     /** 多标签"冷/热"记账：e2e 用它断言常驻窗口真的生效（内存从 O(N) 变 O(K)） */
     getTabRuntime: () => deps.tabRuntimeRef.current.map((tab) => ({ ...tab })),
     residentTabLimit: DEFAULT_RESIDENT_TAB_LIMIT,
-    /**
-     * 滚动条在画布里的位置（画布内 CSS 像素，滚动条交互区）。
-     *
-     * 给 e2e 用：滚动条画在**主视口**右缘/下缘，而主画布比视口宽/高（左右上下的表头与留白），
-     * 所以"画布最右边 4px"根本不在滚动条上——测试按这个 band 的中心按下去才按得准。
-     */
+    /** 滚动条在画布里的位置（画布内 CSS 像素）；给 e2e 按得准用（画布最右边并不在滚动条上） */
     getScrollbarBand: () => deps.getScrollbarBand(),
     /** 某 A1 的高亮矩形（页面坐标）：测试断言"矩形必须包住那一格"（滚动后尤其要成立） */
     rectOfA1: (a1: string) => deps.rectOfA1(a1),
@@ -5011,13 +4409,8 @@ function installTestHooks(deps: TestHooksDeps): void {
       deps.snapshotActiveEditsRef.current();
       return deps.sessionSaverRef.current?.flush() ?? Promise.resolve();
     },
-    /**
-     * **画布此刻真正绑定的工作簿 id**（Univer 层的"当前单元"，不是应用层的活动标签）。
-     *
-     * 两者不一致就是"白屏"那一类故障的核心特征：应用以为在看 A，画布画的是 B（或什么都没画，
-     * 例如当前单元指向一个已被释放的簿）。`blank-page-guard` 用它断言"自愈后绑定确实接回来了"。
-     * 没有活动簿时**不抛异常**（以前这里会 `TypeError`，调用方拿不到"其实是空的"这个信息）。
-     */
+    /** **画布此刻真正绑定的工作簿 id**（Univer 的"当前单元"，不是应用层的活动标签）。两者不一致就是
+     * "白屏"类故障的核心特征；没有活动簿时返回 `null`，不抛异常 */
     getActiveWorkbookId: () => {
       try {
         return apiRef.current?.getActiveWorkbook()?.getWorkbook().getUnitId() ?? null;
@@ -5028,10 +4421,8 @@ function installTestHooks(deps: TestHooksDeps): void {
     getDirtySummary: () =>
       deps.tabsRef.current.map((tab) => ({ id: tab.id, dirtyCells: dirtyCellCount(tab.id) })),
     /**
-     * 插图 blob url 的**未回收计数**（内存泄漏回归用）。
-     *
-     * 口径：这些 url 各自钉着一张图片的字节。关标签/冷存标签/整实例拆卸都必须把它们还回去，
-     * 所以这里能读到 0 才说明"没漏"。以前它们是"登记进一个 Set 然后一辈子不回收"（真实泄漏）。
+     * 插图 blob url 的**未回收计数**（内存泄漏回归用）：每个 url 钉着一份图片字节，
+     * 关标签/冷存/整实例拆卸都必须还回去，读到 0 才说明没漏。
      */
     retainedImageObjectUrls: () => ({
       total: countRetainedImageObjectUrls(),
@@ -5068,16 +4459,11 @@ function installTestHooks(deps: TestHooksDeps): void {
       const sheet = getSheet();
       if (sheet) swapRanges(sheet, a1, b1);
     },
-    /**
-     * "文本格装数字"的弹窗提醒是否已被关掉（`sheets-ui.config.disableForceStringAlert`）。
-     *
-     * 存在的意义：这行配置是在 `bootUniver` 里 try/catch 兜底设置的，
-     * 万一 Univer 换了配置键名，失败会被静默吞掉——e2e 直接读配置，保证它真的生效。
-     */
+    /** "文本格装数字"的弹窗提醒是否已被关掉（`sheets-ui.config.disableForceStringAlert`）：该配置在
+     * `bootUniver` 里是 try/catch 兜底设置的，键名变了会被静默吞掉，所以 e2e 直接读配置确认生效 */
     isForceStringAlertDisabled: () => {
       try {
-        // 必须走**根** injector：工作表 Facade 的 `getInject()` 是渲染/子表作用域，
-        // 里面没有 IConfigService（会抛 "Expect 1 dependency item(s) ... but get 0"）。
+        // 必须走**根** injector：Facade 的 getInject() 是渲染/子表作用域，里面没有 IConfigService
         const config = deps.rootInjectorRef.current?.get(IConfigService) as
           | { getConfig: (id: string) => unknown }
           | undefined;
@@ -5087,10 +4473,7 @@ function installTestHooks(deps: TestHooksDeps): void {
         return false;
       }
     },
-    /**
-     * 测试专用的反向对照开关：把"关弹窗"配置改回去，验证测试**真的能**发现那个弹窗
-     * （否则"没有弹窗"的断言可能只是因为断言本身抓不到东西）。
-     */
+    /** 测试专用反向对照：把"关弹窗"配置改回去，验证测试真的能发现那个弹窗（否则断言本身抓不到东西） */
     setForceStringAlertDisabled: (value: boolean) => {
       try {
         const config = deps.rootInjectorRef.current?.get(IConfigService) as
@@ -5108,7 +4491,7 @@ function installTestHooks(deps: TestHooksDeps): void {
     /** 造一条轻提示（e2e 验"提示统一在一个层里"用；等价于点界面上的动作弹提示） */
     toast: (text: string, kind?: 'info' | 'warn') => deps.toast(text, kind),
 
-    // ---- P2 新增：工作区与拖拽 ----
+    // ---- 工作区与拖拽 ----
     getWorkspaceItems: () =>
       deps.itemsRef.get().map((item) => ({
         id: item.id,
@@ -5119,13 +4502,8 @@ function installTestHooks(deps: TestHooksDeps): void {
         sheetName: item.source.sheetName,
       })),
     clearWorkspace: () => deps.commitWorkspace([], '清空工作区（测试钩子）', 'workspace'),
-    /**
-     * 把选区放进工作区（测试钩子）。
-     *
-     * 与生产路径保持一致：走 `extractCellItems` **拆成一个个独立单元格**（跳过空格），
-     * 返回拆出来的条目数组（条目数 = 该区域内非空单元格数）。
-     * 也走 `commitWorkspace`，所以这些条目同样能被撤销（测试与真实路径行为一致）。
-     */
+    /** 把选区放进工作区（测试钩子）：与生产路径一致，走 `extractCellItems` 拆成独立单元格并跳过空格，
+     * 且走 `commitWorkspace`，所以这些条目同样可撤销 */
     snapshotSelectionToWorkspace: (a1?: string) => {
       const sheet = getSheet();
       if (!sheet) return { items: [], skippedEmpty: 0, truncated: 0, error: '无活动工作表' };
@@ -5160,8 +4538,7 @@ function installTestHooks(deps: TestHooksDeps): void {
       const result = swapRanges(sheet, a1, b1);
       if (result.ok) {
         deps.pushHistory(`互换 ${a1} ⇄ ${b1}`, 'swap');
-        // 与真实交互路径保持一致：互换后同样清选中 + 画黄色提醒框
-        // （否则用这个钩子写的用例看不到提醒框，测出来的行为与用户看到的不是一回事）
+        // 与真实交互路径一致：互换后同样清选中 + 画黄色提醒框（否则钩子用例测的行为与用户看到的不一致）
         deps.flashSwap(a1, b1);
       }
       return result;

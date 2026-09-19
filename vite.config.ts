@@ -15,7 +15,7 @@ import { excelBridgePlugin } from './vite-plugins/vite-plugin-excel-bridge';
  * 用 Vite 的 `--mode` 而不是环境变量：Windows 上 `APP_FORM=static vite build` 这种写法在 npm script 里
  * 不通用（要额外装 cross-env），而 `--mode` 天生跨平台。
  *
- * `base: './'`：项目站点挂在 `https://<user>.github.io/<repo>/` 子路径下，绝对路径 `/assets/...` 会 404。
+ * `base: './'`：静态托管可能把站点挂在子路径下，绝对路径 `/assets/...` 会 404。
  * 形态通过 `__APP_FORM__` 编进产物（`src/shell/app-form.ts` 读取），静态形态下桥相关能力会被隐藏/置灰。
  */
 export default defineConfig(({ mode }) => {

@@ -1,35 +1,13 @@
 /**
- * 「加入工作区」面板（**一个输入框 + 实时预览 + 一个保留/剪切选项**）。
- *
- * 用户要求（原话）："工作区的加号按钮打开的面板请进行重构 … 要求有'加入工作区后保留表格内容'的选项，
- * 务必保证没有无用的元素比如'跳过空单元格'，而且该面板添加的数据不会被历史记录所记录而导致无法撤销"。
- * 因此这一版做了三件事：
- *  ① **删掉"跳过空单元格"那个禁用复选框**——它是不可交互的说明文字，占地方还容易被误读成"能关"；
- *     跳过空内容本来就是底层唯一入口 `extractCellItems` 的固定行为，改成在**预览**里如实报数
- *     （"跳过 156 个空内容"），用户看到的是结果而不是一句空洞的保证；
- *  ② **新增"加入工作区后保留表格内容"选项**：勾选＝复制（表格不动），取消＝剪切（加入后清空这些格子的
- *     内容、保留格式）。它和顶部工具栏"拖到工作区保留内容"是**同一个设置**（`keepSourceOnDrop`），
- *     面板里改一下就会被记住，下次打开还是它 —— 一处语义，两处入口；
- *  ③ **实时预览**：输入框下面直接显示"将加入多少个单元格、跳过多少个空内容、前几格是什么"，
- *     确认键上也带数字（「加入 12 格」）。用户不必先按下去才知道会发生什么。
- *
- * 撤销口径（用户重点强调）：本面板**不直接改任何状态**——它只把
- * `{ kind, value, keepSource }` 抛给上层；上层用工作区的**唯一提交入口**（`commitWorkspace`，
- * 带 before/after 快照的历史条目）和表格侧的统一通道（`beginSheetAction` + `pushHistory`）落地。
- * 所以这里的每一次确认都正好是**一条可撤销的历史**：撤销先回滚表格（剪切的情形），再回滚工作区。
- *
- * 职责边界（纯展示 + 受控回调）：
- *  - 不取数据、不碰 Univer、不读全局状态、不发任何请求；
- *  - 识别与校验全部来自 `import-parse.ts`（`detectImportKind` + 三个 parse 函数）与
- *    `selection-ranges.ts`（多块写法），组件只负责呈现与交互；`resolveImportDraft` 是唯一把
- *    "识别结果 + 提交值 + 文案"揉在一起的纯函数（导出是为了单测能直接覆盖，UI 只调它一个）；
- *    预览统计由上层通过 `onPreview` 注入（它需要读表），本组件只渲染；
- *  - 只有 `useState` 管草稿 + 必要的焦点管理副作用（自动聚焦、ESC、焦点陷阱、关闭后还原焦点）。
- *
+ * 「加入工作区」面板：一个输入框 + 实时预览 + 保留/剪切选项。
+ * 只改单元格内容、不动格式/结构；本组件不直接改任何状态，只把 `{ kind, value, keepSource }` 抛给上层，
+ * 由 `commitWorkspace` / `pushHistory` 落地，所以每次确认正好是一条可撤销的历史。
+ * 「保留表格内容」与工具栏 `keepSourceOnDrop` 是同一个设置，一处语义两处入口；
+ * 跳过空内容是底层 `extractCellItems` 的固定行为，不必用禁用复选框说明，改在预览里如实报数。
+ * 识别与校验全部来自 `import-parse.ts` / `selection-ranges.ts`，预览统计由上层 `onPreview` 注入。
  * testid 契约（e2e 依赖，勿改名）：import-dialog / import-close / import-input / import-error /
  * import-detected / import-use-selection / import-whole-sheet / import-preview /
  * import-preview-summary / import-preview-samples / import-keep-source / import-cancel / import-confirm。
- * （`import-skip-empty` 已随那个无用复选框一起删除。）
  */
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import type { ChangeEvent, FormEvent, MouseEvent as ReactMouseEvent } from 'react';
@@ -37,7 +15,6 @@ import type { ChangeEvent, FormEvent, MouseEvent as ReactMouseEvent } from 'reac
 import { CloseIcon } from '../shell/icons';
 import { detectImportKind, parseColumnInput, parseRangeInput, parseRowInput } from './import-parse';
 import type { ImportTargetKind, ParseResult } from './import-parse';
-// 多块区域（Ctrl+点选）的写法与规范化：与表格里的多选共用同一套纯函数
 import { parseRangeList, rectsToA1, totalCells } from '../interaction/selection-ranges';
 import { PREVIEW_EMPTY_CAP, type WorkspaceImportPreview } from './snapshot';
 import './import-dialog.css';
@@ -54,13 +31,11 @@ export interface ImportSubmitPayload {
 
 export interface ImportDialogProps {
   open: boolean;
-  /** 关闭（点遮罩/ESC/取消） */
   onClose: () => void;
   /** 当前选区对应的 A1 记号，用于"当前选区"按钮；无选区传 null */
   currentSelectionA1: string | null;
-  /** 当前工作表名，用于文案 */
   sheetName: string;
-  /** 当前表「已用区域」的 A1 记号（用于"整个已用区域"一键填范围）；空表传 null */
+  /** 当前表「已用区域」的 A1 记号，用于一键填范围；空表传 null */
   usedRangeA1: string | null;
   /** 加入工作区后是否保留表格内容（与顶部工具栏开关共用同一个设置） */
   keepSource: boolean;
@@ -69,18 +44,16 @@ export interface ImportDialogProps {
   onPreview?: (target: { kind: ImportTargetKind; value: string }) => WorkspaceImportPreview | null;
   /** 用户确认后的结果（上层负责落地成一条可撤销的历史） */
   onSubmit: (result: ImportSubmitPayload) => void;
-  /** 提交中（禁用按钮） */
   busy?: boolean;
 }
 
-/** 输入框标题 / 占位符 / 提示：三种写法都写得下，用户不必先选类型 */
+/** 输入框占位符与提示：三种写法都写得下，用户不必先选类型 */
 const FIELD_LABEL = '数据范围';
 const PLACEHOLDER = '例如 3、B:D 或 A1:B18';
 const HINT = '同一个输入框自动识别：行号 3 / 3:5、列标 B / B:D、区域 A1:B18（$A$1:$B$18 也认）。多块区域用空格分开，如 A1:B2 D4:E5。';
 
-/** 空输入时识别行显示的占位文案（不飘红：刚打开就满屏红字太吓人） */
+/** 识别行为空的输入保留占位（不飘红：刚打开就满屏红字太吓人）；非空但识别不出则显示"无法识别" */
 const DETECTED_EMPTY = '识别为：—';
-/** 非空但识别不出时识别行显示的内容（具体原因由下方的 import-error 给出） */
 const DETECTED_INVALID = '无法识别';
 const GENERIC_ERROR = '无法识别：请输入行号（3 或 3:5）、列标（B 或 B:D）或区域（A1:B18）';
 
@@ -116,12 +89,7 @@ function toSubmitValue(kind: ImportTargetKind, value: string): string {
   return value;
 }
 
-/**
- * 识别结果那行的文案（不含"识别为："前缀）：
- * `('row', '3')`→`'第 3 行'`、`('row', '3:5')`→`'第 3:5 行'`、
- * `('column', 'B:D')`→`'B:D 列'`、`('range', 'A1:B18')`→`'区域 A1:B18'`。
- * 导出仅为单测能直接覆盖这行 UI 文案。
- */
+/** 识别结果那行的文案（不含"识别为："前缀）；导出仅为单测能直接覆盖这行 UI 文案 */
 export function describeImportTarget(kind: ImportTargetKind, value: string): string {
   switch (kind) {
     case 'row':
@@ -133,11 +101,8 @@ export function describeImportTarget(kind: ImportTargetKind, value: string): str
   }
 }
 
-/**
- * 识别失败时，尽量按用户的"本来意图"给一句具体原因（纯文案，不参与解析）：
- * 空 → 内部空格 → 非半角字符 → 按形状挑一个解析函数取其错误文案。
- * 走到这里时三个解析函数必然全部失败，所以一定拿得到具体的 `error`。
- */
+// 识别失败时按用户的"本来意图"给一句具体原因（纯文案，不参与解析）：
+// 空 → 内部空格 → 非半角 → 按输入形状挑一个解析函数取其错误文案——走到这里三个解析函数必然全失败。
 function explainImportError(raw: string): string {
   const text = typeof raw === 'string' ? raw.trim() : '';
   if (text === '') return '请输入行号、列标或区域';
@@ -146,7 +111,7 @@ function explainImportError(raw: string): string {
 
   const hasLetter = /[A-Za-z]/.test(text);
   const hasDigit = /[0-9]/.test(text);
-  if (!hasLetter && !hasDigit) return GENERIC_ERROR; // ':'、'$'、'$$' 这类"什么都没有"的输入
+  if (!hasLetter && !hasDigit) return GENERIC_ERROR;
 
   // 按输入形状挑一个"最像用户本来意图"的解析函数，借它的错误文案（例如"列标超出范围（最大 XFD）"）
   const parsed = hasLetter && hasDigit
@@ -157,31 +122,23 @@ function explainImportError(raw: string): string {
   return parsed.ok ? GENERIC_ERROR : parsed.error;
 }
 
-/** 识别成功的结果 */
 export interface ResolvedImport {
   kind: ImportTargetKind;
-  /** 解析函数规范化后的输入（行 `'3'` / `'3:5'`、列 `'B'` / `'B:D'`、区域 `'A1'` / `'A1:B18'`） */
+  /** 解析函数规范化后的输入（行 `'3'`/`'3:5'`、列 `'B'`/`'B:D'`、区域 `'A1'`/`'A1:B18'`） */
   value: string;
   /** 抛给上层 `onSubmit` 的 value（区域补全成 `A1:A1`） */
   submitValue: string;
-  /** 识别结果那行的文案（不含"识别为："前缀） */
   label: string;
 }
 
 /** 草稿的识别 + 校验结果：判别联合（`ok` 收窄） */
 export type ResolvedDraft = ({ ok: true } & ResolvedImport) | { ok: false; error: string };
 
-/**
- * 把输入框里的原始草稿变成"加入目标"：**纯函数**，识别 + 校验 + 归一化 + 文案一步到位。
- * 识别不出（含空输入）时给出面向用户的原因，调用方据此禁用确认键并显示错误。
- */
+// 把输入框草稿变成"加入目标"的纯函数：识别 + 校验 + 归一化 + 文案一步到位；
+// 识别不出（含空输入）时给面向用户的原因，调用方据此禁用确认键并显示错误。
 export function resolveImportDraft(raw: string): ResolvedDraft {
-  /**
-   * **多块区域**（用户要求"不连续多区域 Ctrl+点选"）：`A1:B2 D4:E5` 也认。
-   *
-   * 判定放在最前面：多块写法用空格/逗号/顿号分隔，与单块的"中间不能有空格"规则天然互斥，
-   * 所以不会和既有识别打架。提交值原样带上全部块（空格分隔），由上层逐块取内容。
-   */
+  // 多块区域（Ctrl+点选）`A1:B2 D4:E5` 也认：判定放最前面，多块用空格/逗号分隔，
+  // 与单块"中间不能有空格"天然互斥，不会和既有识别打架；提交值原样带上全部块，由上层逐块取。
   const multi = parseRangeList(raw);
   if (multi.rects.length > 1 && multi.invalid.length === 0) {
     const a1List = rectsToA1(multi.rects);
@@ -214,13 +171,8 @@ export function resolveImportDraft(raw: string): ResolvedDraft {
   };
 }
 
-/**
- * 预览摘要那一行的文案（导出仅为单测能直接覆盖这行 UI 文案）：
- * `将加入 12 个单元格 · 跳过 156 个空内容`；没有预览（未识别 / 未注入钩子）时返回 null。
- *
- * 空格子数到 `PREVIEW_EMPTY_CAP` 就不再展示：用户可以把选区写得极大（`A1:A1048576`），
- * 报一个上亿的数字只会让人困惑（"到底要搬多少"看的是 `total`）。
- */
+// 预览摘要那一行的文案（导出仅为单测）：空格子数到 PREVIEW_EMPTY_CAP 就不再展示——
+// 用户可以把选区写得极大（A1:A1048576），报一个上亿的数字只会让人困惑，"要搬多少"看 total。
 export function describeImportPreview(preview: WorkspaceImportPreview | null): string | null {
   if (!preview) return null;
   const parts: string[] = [`将加入 ${preview.total} 个单元格`];
@@ -234,7 +186,6 @@ export function importConfirmLabel(preview: WorkspaceImportPreview | null): stri
   return preview && preview.total > 0 ? `加入 ${preview.total} 格` : '加入工作区';
 }
 
-/** 收集容器内当前可聚焦的元素（顺序即 DOM 顺序） */
 function focusableIn(root: HTMLElement): HTMLElement[] {
   return Array.from(root.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)).filter((el) => el.tabIndex >= 0);
 }
@@ -349,7 +300,6 @@ export function ImportDialog({
   const trimmed = draft.trim();
   const isEmpty = trimmed === '';
   const resolved = resolveImportDraft(draft);
-  // 空输入不飘红（占位符和提示已经说清楚了）；非空且识别不出时立刻给出原因
   const error = !resolved.ok && !isEmpty ? resolved.error : null;
   const detected = resolved.ok
     ? `识别为：${resolved.label}`
@@ -555,7 +505,7 @@ export function ImportDialog({
               </p>
             </div>
 
-            {/* 实时预览：确认之前就把"会发生什么"如实摆出来（替代原来那个不可点的"跳过空单元格"） */}
+            {/* 实时预览：确认之前就把"会发生什么"如实摆出来 */}
             <section
               className={cls('imp-preview', preview && preview.total > 0 ? 'is-ready' : undefined)}
               data-testid="import-preview"
@@ -584,7 +534,6 @@ export function ImportDialog({
               ) : null}
             </section>
 
-            {/* 保留 / 剪切：与顶部工具栏"拖到工作区保留内容"是同一个设置 */}
             <div className="imp-keep-row">
               <label className="imp-check" htmlFor={keepId}>
                 <input

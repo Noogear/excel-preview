@@ -1,21 +1,11 @@
 /**
  * 单工作表解析：`xl/worksheets/sheetN.xml`。
  *
- * 覆盖范围：
- * - `sheetData` 的行/列引用（A1 / AB12）、行高、隐藏行、自定义行高
- * - 单元格值类型：共享字符串 / 公式字符串 / 内联字符串 / 布尔 / 错误 / 数字
- * - 公式 `<f>` 与缓存值 `<v>`
- * - `mergeCells`、冻结窗格、`showGridLines`、`cols` 列宽、`dimension`、`sheetFormatPr`
- * - P1：`<hyperlinks>`（ref / r:id / location / display / tooltip）、`<tableParts>`（收集 r:id）、
- *   `<drawing r:id>`；`sqref` 展开成 A1 区域数组（`expandSqref`，条件格式与数据验证共用）
- * - 打印设置（`pageSetup`/`pageMargins`/`headerFooter`/`printOptions`/分页符）**已解析**进
- *   `sheet.print`，只影响打印 → 进 `report.preserved`，不再列为"未支持"
- * - 仍**不解析**但按种类记账的功能进 `unsupported`（迷你图 / 排序状态 / VML 绘图 / 保护 / …）：
- *   条件格式、数据验证、超链接、表格、批注、浮动图片自 P1 起已解析，不再记账。
- *
- * 本文件只读**工作表自身**的 XML；批注/表格/绘图等外部部件由编排层（index.ts）通过
- * `xl/worksheets/_rels/sheetN.xml.rels` 定位、解析后经 `ParseWorksheetInput.parts` 注入，
- * 因此这里不依赖 zip，也不依赖任何 IO。
+ * 覆盖：行/列引用与稀疏行、各单元格值类型（共享字符串 / 内联 / 布尔 / 错误 / 数字）、
+ * 公式 `<f>` 与缓存值 `<v>`、mergeCells、冻结窗格、cols 列宽、dimension、sqref 展开、
+ * 超链接/表格/绘图引用、打印设置（进 `sheet.print`，只影响打印 → `preserved`）；
+ * 仍不解析的按种类记账进 `unsupported`（迷你图 / 排序状态 / VML 绘图 / 保护 / …）。
+ * 外部部件（批注/表格/绘图）由 index.ts 结合 sheet rels 解析后经 `parts` 注入，本文件无 IO。
  */
 import type {
   ParsedCell, ParsedCellValue, ParsedColInfo, ParsedHyperlink, ParsedImage, ParsedMerge,
@@ -40,9 +30,7 @@ const CR = 13;
 const LOWER_V = 118;
 const LOWER_F = 102;
 
-/* -------------------------------------------------------------------------- */
-/* 引用解析                                                                    */
-/* -------------------------------------------------------------------------- */
+/* ---- 引用解析 ---- */
 
 /** "AB12" -> { row: 11, col: 27 }（0-based；行 1-based -> 0-based，列字母 -> 0-based） */
 export function parseCellRef(ref: string): { row: number; col: number } | undefined {
@@ -92,14 +80,9 @@ export function parseRangeRef(ref: string): ParsedMerge | undefined {
   };
 }
 
-/* -------------------------------------------------------------------------- */
-/* sqref：'A1:B2 D4:E5' -> ['A1:B2', 'D4:E5']                                   */
-/* -------------------------------------------------------------------------- */
+/* ---- sqref：'A1:B2 D4:E5' -> ['A1:B2', 'D4:E5'] ---- */
 
-/**
- * 按空白切分 sqref（`<conditionalFormatting sqref>`、`<dataValidation sqref>`、
- * `<mergeCell>` 之外的引用型属性都用空白分隔多个区域）。不做合法性校验，也不建中间字符串。
- */
+/** 按空白切分 sqref：条件格式 / 数据验证的 `sqref` 都用空白分隔多个区域，不做合法性校验。 */
 export function splitSqref(sqref: string): string[] {
   const out: string[] = [];
   const len = sqref.length;
@@ -139,10 +122,7 @@ function endpointKind(part: string): 0 | 1 | 2 | 3 {
   return parseCellRef(p) !== undefined ? 1 : 0;
 }
 
-/**
- * sqref -> A1 区域数组：`'A1:B2 D4:E5'` -> `['A1:B2', 'D4:E5']`。
- * 非法片段被丢弃；给了 `warn` 时逐条记录（`owner` 用于指明来源，如 `dataValidation`）。
- */
+/** sqref -> A1 区域数组；非法片段丢弃，给了 `warn` 时逐条记录（`owner` 标明来源）。 */
 export function expandSqref(sqref: string, warn?: Warn, owner?: string): string[] {
   const out: string[] = [];
   for (const token of splitSqref(sqref)) {
@@ -152,14 +132,9 @@ export function expandSqref(sqref: string, warn?: Warn, owner?: string): string[
   return out;
 }
 
-/* -------------------------------------------------------------------------- */
-/* sharedStrings                                                               */
-/* -------------------------------------------------------------------------- */
+/* ---- sharedStrings ---- */
 
-/**
- * `xl/sharedStrings.xml` -> 纯文本数组（索引 == `t="s"` 单元格的 `<v>` 值）。
- * 富文本（多个 `<r>` run）在 P0 里直接拼接为纯文本，格式化信息丢弃。
- */
+/** `xl/sharedStrings.xml` -> 纯文本数组（索引 == `t="s"` 单元格的 `<v>`）；多 `<r>` run 的富文本直接拼接，run 级格式丢弃。 */
 export function parseSharedStrings(xml: string, warn: (msg: string) => void): string[] {
   const out: string[] = [];
   let richTextCount = 0;
@@ -193,9 +168,7 @@ function concatRuns(xml: string, runs: ElementRange[]): string {
   return out;
 }
 
-/* -------------------------------------------------------------------------- */
-/* 单元格                                                                      */
-/* -------------------------------------------------------------------------- */
+/* ---- 单元格 ---- */
 
 interface CellContext {
   xml: string;
@@ -210,16 +183,8 @@ interface CellParts {
 }
 
 /**
- * 单元格子元素读取——**热路径**。
- *
- * 绝大多数单元格只有 `<v>`（值）和 `<f>`（公式）两种子元素，而百万格规模下
- * "通用访问器 + 每子元素建 ElementRange/attrs 对象 + 数组"的开销是主要成本（实测占解析时间大头）。
- * 这里用 indexOf 直接取 `<v>`/`<f>` 的内部文本，**零对象分配**；返回 `after` 让调用方直接跳到
- * 单元格内容之后，从而**不必为每个 `<c>` 再做一次 findCloseTag**（那正是 21% 的自身耗时来源）。
- *
- * 一旦遇到不认识的东西（`<is>` 内联字符串、`<extLst>` 等扩展），立刻退回通用实现，
- * 保证行为与通用路径完全一致——快路径只覆盖"确定安全"的子集。
- */
+ * 单元格子元素读取（**热路径**）：绝大多数格只有 `<v>`/`<f>`，用 indexOf 直接取内部文本、零对象分配，并返回
+ * `after` 让调用方跳过 `findCloseTag`（百万格下的主要开销）；遇到不认识的子元素立刻退回通用实现，行为一致。 */
 function readCellPartsFast(ctx: CellContext, contentStart: number, limit: number): { parts: CellParts; after: number } {
   const xml = ctx.xml;
   const parts: CellParts = {};
@@ -307,8 +272,7 @@ function readInlineString(ctx: CellContext, isEl: ElementRange): { text: string;
 }
 
 function cellValueFrom(cellType: string, parts: CellParts, ctx: CellContext): ParsedCellValue | undefined {
-  // 内联字符串：规范要求 t="inlineStr"，但 `<is>` 只可能出现在内联字符串单元格里，
-  // 因此即使 t 属性缺失/写错也按内联字符串取值（容错优先，避免整格内容丢失）。
+  // 规范要求 t="inlineStr"，但 `<is>` 只可能出现在内联字符串单元格里，t 缺失/写错也按内联串取值（容错优先）。
   if (cellType === 'inlineStr' || (parts.inline !== undefined && parts.vText === undefined)) {
     const inline = parts.inline;
     if (!inline) return '';
@@ -359,11 +323,8 @@ function cellValueFrom(cellType: string, parts: CellParts, ctx: CellContext): Pa
   }
 }
 
-/**
- * 单元格节点的**最小视图**：热路径用它替代完整的 `ElementRange`，
- * 以便复用一个 scratch 对象、不给百万个单元格各建一份区间对象。
- * `ElementRange` 天然满足这个结构，所以旧调用点无需改动。
- */
+/** 单元格节点的最小视图：热路径用它替代 `ElementRange`，复用 scratch 对象、不给百万格各建区间对象
+ * （`ElementRange` 天然满足此结构）。 */
 interface CellNode {
   attrs: XmlAttributes;
   openEnd: number;
@@ -408,9 +369,7 @@ function buildCellFrom(
   return out;
 }
 
-/* -------------------------------------------------------------------------- */
-/* 行 / 列 / 合并 / 冻结                                                       */
-/* -------------------------------------------------------------------------- */
+/* ---- 行 / 列 / 合并 / 冻结 ---- */
 
 /** 热路径复用的单元格视图（解析是同步单线程，不存在重入） */
 const CELL_SCRATCH: CellNode = { attrs: {}, openEnd: 0, closeEnd: 0, selfClosing: false };
@@ -480,8 +439,7 @@ function parseSheetRows(
       let parts: CellParts;
       let next: number;
       if (CELL_SCRATCH.selfClosing) {
-        // `<c r="A1" s="1"/>`：没有子元素，单元格到开始标签就结束。
-        // 必须显式处理——否则会把"下一个单元格"的内容当成自己的子元素读进来（吞格）。
+        // `<c r="A1" s="1"/>` 没有子元素：必须显式处理，否则会把下一个单元格的内容当自己的子元素读进来（吞格）。
         CELL_SCRATCH.closeEnd = cgt + 1;
         parts = {};
         next = cgt + 1;
@@ -509,8 +467,7 @@ function parseSheetRows(
       k = next > k ? next : k + 1;
     }
 
-    // 安全网：这一行按 `<c>` 一个都没扫到、但行内容非空 → 说明写法不是标准无前缀形式，
-    // 退回通用实现重扫这一行（宁可慢，也不能静默丢数据）
+    // 安全网：一个 `<c>` 都没扫到但行内容非空 → 写法不是标准无前缀形式，退回通用实现重扫（宁可慢，不静默丢数据）
     if (cells.length === before && rowLimit > gt + 1) {
       for (const cellEl of childElements(xml, { ...rowAttrsOwner(xml, lt, gt, rowLimit) })) {
         if (!nameMatches(cellEl.name, 'c')) continue;
@@ -614,9 +571,7 @@ function parseMerges(xml: string, warn: (msg: string) => void, from = 0): Parsed
   return merges;
 }
 
-/* -------------------------------------------------------------------------- */
-/* 冻结窗格 / 视图 / 维度                                                      */
-/* -------------------------------------------------------------------------- */
+/* ---- 冻结窗格 / 视图 / 维度 ---- */
 
 interface SheetViewInfo {
   freeze?: { row: number; col: number };
@@ -681,9 +636,7 @@ function parseSheetFormatPr(xml: string): FormatPr {
   return out;
 }
 
-/* -------------------------------------------------------------------------- */
-/* 超链接 / 表格 / 绘图 的**引用**（关系 id 由编排层结合 sheet rels 解析）          */
-/* -------------------------------------------------------------------------- */
+/* ---- 超链接 / 表格 / 绘图的**引用**（关系 id 由编排层结合 sheet rels 解析） ---- */
 
 /** `<hyperlink>` 的原始属性（`r:id` 尚未解析成目标） */
 export interface RawHyperlink {
@@ -705,14 +658,11 @@ export interface SheetPartRefs {
   drawingRelId?: string;
 }
 
-/**
- * 单遍扫描工作表 XML，取出超链接 / 表格 / 绘图三处**引用**。
- * 与 `collectUnsupported` 一样是纯 tokenizer 级扫描：只对目标元素建对象，不建整棵树。
- */
+/** 单遍扫描工作表 XML，取出超链接 / 表格 / 绘图三处**引用**（纯 tokenizer 级扫描：
+ * 只对目标元素建对象，不建整棵树）。 */
 export function parseSheetPartRefs(xml: string, from = 0): SheetPartRefs {
   const refs: SheetPartRefs = { hyperlinks: [], hasHyperlinks: false, tableRelIds: [] };
-  // 只对这三种元素回调：无 `match` 时**每个**元素都会回调并建区间/属性对象，
-  // 百万格的表就是几百万次无用对象分配（实测占解析时间可观）。
+  // 只对这三种元素回调：无 `match` 时**每个**元素都会回调并建区间/属性对象（百万格即百万次无用分配）。
   // `from` 由编排层给出（这些都排在 sheetData 之后），避免再走一遍整个表数据。
   visitElements(xml, (el) => {
     const ln = localName(el.name);
@@ -758,13 +708,9 @@ function isPartRefName(name: string): boolean {
   return ln === 'hyperlinks' || ln === 'tableParts' || ln === 'drawing';
 }
 
-/**
- * 把 `<hyperlink>` + sheet rels 的目标合成契约里的 `ParsedHyperlink`。
- *
- * `location` 以 `#` 开头（Excel 内部链接两种写法）时去掉 `#`；
- * rels 的 `Target` 若本身是 `#Sheet!A1`，它表达的是"文档内位置"而不是外部 URL，
- * 因此并入 `location`，不写进 `target`（否则下游会把 `#...` 当成可点击的外链）。
- */
+/** 把 `<hyperlink>` + sheet rels 的目标合成 `ParsedHyperlink`：`location` 的 `#` 前缀会去掉；rels 的
+ * `Target` 若是 `#Sheet!A1` 这类文档内位置，并入 `location` 而不写 `target`（否则下游会把 `#...`
+ * 当成可点击的外链）。 */
 function buildHyperlinks(
   raw: readonly RawHyperlink[],
   targets: ReadonlyMap<string, string> | undefined,
@@ -793,17 +739,11 @@ function buildHyperlinks(
   return out;
 }
 
-/* -------------------------------------------------------------------------- */
-/* 不支持特性记账                                                              */
-/* -------------------------------------------------------------------------- */
+/* ---- 不支持特性记账 ---- */
 
-/**
- * 仍**不解析**的元素 -> 记账标签（按种类计数，只统计每类一条，避免 report 被上万条撑爆）。
- *
- * P1 变更：conditionalFormatting / dataValidations / hyperlinks / tableParts / comments /
- * drawing（浮动图片）已经从这张表里移除——它们现在真的被解析进中立模型了。
- * 剩下的是确实没还原的：打印设置、迷你图、排序状态、VML 绘图、OLE、保护、透视表等。
- */
+/** 仍**不解析**的元素 -> 记账标签（按种类计数，每类只计一条，避免 report 被上万条撑爆）。条件格式 /
+ * 数据验证 / 超链接 / 表格 / 批注 / 浮动图片已解析进中立模型，不在此表内；剩下的是确实没还原的：
+ * 迷你图、排序状态、VML 绘图、OLE、保护、透视表等。 */
 const UNSUPPORTED_LABELS: Readonly<Record<string, string>> = {
   extLst: '扩展列表(extLst)',
   autoFilter: '自动筛选(autoFilter)',
@@ -821,13 +761,9 @@ const UNSUPPORTED_LABELS: Readonly<Record<string, string>> = {
   ignoredErrors: '忽略错误标记(ignoredErrors)',
 };
 
-/**
- * 打印相关标签：**不再计入"未支持"**，改成解析成真值 + 进 `report.preserved`。
- *
- * 理由（用户实测反馈）：导入座位表时状态栏显示"未支持 1 项"，点开是"打印设置"——
- * 而打印设置只影响打印，屏幕预览与内容编辑完全不受影响，导出又走字节级保真路线原样保留它，
- * 把它列为"未支持"是误导。现在的口径：**能读到值就记下来，并在导入摘要里说明"不影响预览"**。
- */
+/** 打印相关标签：解析成真值 + 进 `report.preserved`，**不算"未支持"**。它们只影响打印，预览与编辑
+ * 不受影响，导出又走字节级保真原样保留，列为"未支持"会误导用户；口径是"能读到值就记下来，
+ * 并说明不影响预览"。 */
 const PRINT_TAGS: ReadonlySet<string> = new Set([
   'pageSetup',
   'pageMargins',
@@ -837,24 +773,17 @@ const PRINT_TAGS: ReadonlySet<string> = new Set([
   'colBreaks',
 ]);
 
-/**
- * x14/x15 扩展里"同一功能的现代写法"。它们用**带前缀的标签名**出现
- * （`<x14:dataValidations>`、`<x14:conditionalFormattings>`），
- * 而带前缀就意味着走的不是我们已经支持的那条老路径，因此单独记账。
- */
+/** x14/x15 扩展里"同一功能的现代写法"：用**带前缀的标签名**出现（如 `<x14:dataValidations>`），
+ * 带前缀意味着不走已支持的老路径，因此单独记账。 */
 const X14_LABELS: Readonly<Record<string, string>> = {
   dataValidations: 'x14 扩展数据验证(x14:dataValidations)',
   conditionalFormattings: 'x14 扩展条件格式(x14:conditionalFormattings)',
   sparklineGroups: 'x14 迷你图(x14:sparklineGroups)',
 };
 
-/**
- * 单遍扫描工作表 XML，把**不解析**的特性按种类计数成 `标签 · N 处（未解析）`。
- *
- * 只扫标签（跳过注释 / PI / 结束标签），不建元素对象、不复制文本；
- * 命中即记账，但**不跳过子树**——`<extLst>` 里还可能嵌着 x14 版本的另一类特性，
- * 跳过会漏记（实测 fixture-rules.xlsx 的 `<extLst>` 里就有 x14 条件格式）。
- */
+/** 单遍扫描工作表 XML，把**不解析**的特性按种类计数成 `标签 · N 处（未解析）`：只扫标签（跳过注释 /
+ * PI / 结束标签），不建元素对象。命中即记账但**不跳过子树**——`<extLst>` 里可能嵌着 x14 版本的
+ * 另一类特性，跳过会漏记。 */
 function collectUnsupported(xml: string): string[] {
   const counts = new Map<string, number>();
   const len = xml.length;
@@ -891,7 +820,6 @@ function collectUnsupported(xml: string): string[] {
     }
     if (gt < 0) break;
     const ln = localName(name);
-    // 打印相关标签走"已解析并原样保留"那条路（见 PRINT_TAGS 的说明），不算未支持
     if (PRINT_TAGS.has(ln)) {
       i = gt + 1;
       continue;
@@ -921,13 +849,9 @@ function trimNumber(value: number): string {
   return Number.isInteger(value) ? String(value) : String(Number(value.toFixed(3)));
 }
 
-/**
- * 解析一页工作表的打印设置（`pageSetup` / `pageMargins` / `headerFooter` / `printOptions` / 分页符）。
- *
- * 这些字段只影响打印，不影响屏幕预览；解析它们的目的**不是**在预览里还原，
- * 而是：① 让导入摘要能说清"文件里有什么、我们怎么处理的"；
- * ② 不再把它们误报成"未支持"。导出时它们由字节级保真路线原样保留。
- */
+/** 解析一页工作表的打印设置（pageSetup / pageMargins / headerFooter / printOptions / 分页符）：目的
+ * **不是**在预览里还原（它们只影响打印），而是让导入摘要说清"文件里有什么"，且不再误报成"未支持"；
+ * 导出时由字节级保真路线原样保留。 */
 export function parsePrintSettings(xml: string): { print?: ParsedPrintSettings; summary?: string } {
   const print: ParsedPrintSettings = {};
   let touched = false;
@@ -1035,9 +959,7 @@ function describePrint(print: ParsedPrintSettings): string {
   return parts.length > 0 ? parts.join(' · ') : '文件里只有空的打印设置占位（无需处理）';
 }
 
-/* -------------------------------------------------------------------------- */
-/* 主入口                                                                      */
-/* -------------------------------------------------------------------------- */
+/* ---- 主入口 ---- */
 
 export interface WorksheetDiagnostics {
   warnings: string[];
@@ -1054,7 +976,6 @@ export interface ParseWorksheetInput {
   veryHidden?: boolean;
   xml: string;
   sharedStrings: readonly string[];
-  /* ---- P1 新增（全部可选，缺省时行为与 P0 完全一致） ---- */
   /** 已扫描好的部件引用；给了就不必再扫一遍工作表 XML */
   refs?: SheetPartRefs;
   /** sheet rels 解析出的超链接目标：relId -> Target（外部链接原样，内部 `#A1` 形式会被并进 location） */
@@ -1096,8 +1017,7 @@ export function parseWorksheet(input: ParseWorksheetInput): ParseWorksheetResult
     sheet.rows = parseSheetRows(input.xml, sheetData, ctx, sheet.cells);
   }
 
-  // `sheetData` 之后的"尾巴"起点：合并区/超链接/表格/绘图等一律排在表数据之后，
-  // 从这里起步就不必为每个特性各走一遍整个表数据（百万格时这就是主要开销）。
+  // `sheetData` 之后的"尾巴"起点：合并区/超链接/表格/绘图等一律排在表数据之后，从此起步可避免为每个特性重扫整张表。
   const tail = sheetData ? sheetData.closeEnd : 0;
   const atLeast = (localName: string): number => earliestNameAt(input.xml, localName, tail);
 
@@ -1121,7 +1041,6 @@ export function parseWorksheet(input: ParseWorksheetInput): ParseWorksheetResult
   const printInfo = parsePrintSettings(input.xml);
   if (printInfo.print) sheet.print = printInfo.print;
 
-  // 超链接：本表的 `<hyperlink>` + sheet rels 的目标
   const refs = input.refs ?? parseSheetPartRefs(input.xml, sheetData ? atLeast('hyperlinks') : 0);
   if (refs.hasHyperlinks) {
     const links = buildHyperlinks(refs.hyperlinks, input.hyperlinkTargets, warn);
@@ -1147,9 +1066,7 @@ export function parseWorksheet(input: ParseWorksheetInput): ParseWorksheetResult
   };
 }
 
-/* -------------------------------------------------------------------------- */
-/* 局部工具                                                                    */
-/* -------------------------------------------------------------------------- */
+/* ---- 局部工具 ---- */
 
 function isNameStop(c: number): boolean {
   return c === 32 || c === 9 || c === 10 || c === 13 || c === 47 || c === 62 || c === 61;

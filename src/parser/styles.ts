@@ -1,11 +1,8 @@
 /**
  * 样式解析：`xl/styles.xml` + `xl/theme/theme1.xml`。
- *
  * 产出 `ParsedStyle[]`，索引与 `cellXfs` 顺序一一对应（即工作表里 `c/@s` 的取值）。
- * 全部颜色统一归一化为 `#RRGGBB`；无法解析的颜色记 warning 并省略该字段（不抛异常）。
- *
- * 引用的规范：ECMA-376 Part 1 §18.8（styles）、§20.1.6（theme clrScheme）、
- * §18.8.27（numFmt 内置格式）。
+ * 颜色统一归一化为 `#RRGGBB`；无法解析的颜色记 warning 并省略该字段（不抛异常）。
+ * 规范：ECMA-376 Part 1 §18.8（styles）、§20.1.6（theme clrScheme）、§18.8.27（numFmt）。
  */
 import type { BorderLineStyle, CfDxfStyle, ParsedBorder, ParsedStyle } from './types';
 import {
@@ -14,15 +11,9 @@ import {
   type ElementRange, type XmlAttributes,
 } from './xml';
 
-/* -------------------------------------------------------------------------- */
-/* 内置 numFmt 表（id 0–49）                                                   */
-/* -------------------------------------------------------------------------- */
+/* ---- 内置 numFmt 表（id 0–49） ---- */
 
-/**
- * 内置格式 id -> pattern。
- * 说明：ECMA-376 里 14–22、45–47 的**具体 pattern 由区域设置决定**，
- * 绝大多数区域与 Excel 的经典实现一致，这里采用其通行写法。
- */
+/** 内置格式 id -> pattern；14–22、45–47 的具体 pattern **由区域设置决定**，此处用 Excel 通行写法 */
 export const BUILTIN_NUM_FMTS: Readonly<Record<number, string>> = {
   0: 'General',
   1: '0',
@@ -48,12 +39,8 @@ export const BUILTIN_NUM_FMTS: Readonly<Record<number, string>> = {
   21: 'h:mm:ss',
   22: 'm/d/yyyy h:mm',
   /**
-   * 23–36：**区域相关**的内置格式（ECMA-376 §18.8.30 把它们留给东亚/其它区域）。
-   *
-   * 这里按**中日韩区域的通行实现**填上（27–36 是中日文日期/时间写法）。
-   * 实测来历：`fixture-numfmt` 的 `yyyy"年"m"月"d"日"` 在 xlsx 里是自定义格式，
-   * 而 Excel「另存为 .xls」时把它换成了**内置 id 31** —— 早期表里 31 写的是 `General`，
-   * 于是 .xls 里这个日期格式整条丢掉（用户看到日期变成"常规"）。
+   * 23–36 是**区域相关**的内置格式（ECMA-376 §18.8.30 留给东亚的写法），按中日韩通行实现填入。
+   * Excel「另存为 .xls」会把自定义的 `yyyy"年"m"月"d"日"` 换成内置 id 31，此处留空会丢整个日期格式。
    */
   23: 'General',
   24: 'General',
@@ -87,14 +74,9 @@ export const BUILTIN_NUM_FMTS: Readonly<Record<number, string>> = {
 /** `numFmtId="164"` 起才是自定义格式；小于该值优先查内置表 */
 export const CUSTOM_NUM_FMT_BASE_ID = 164;
 
-/* -------------------------------------------------------------------------- */
-/* indexex 调色板（ECMA-376 §18.8.27 的继承表 + Excel 经典 64 色调色板）          */
-/* -------------------------------------------------------------------------- */
+/* ---- 索引调色板（ECMA-376 §18.8.27） ---- */
 
-/**
- * 索引调色板（ECMA-376 §18.8.27 继承的 Excel 经典 64 色调色板）。
- * 0/1 是系统前景/背景，2–7 是经典八色，8–15 是重复的"半亮"档，16 起是扩展色。
- */
+/** 索引调色板：0/1 系统前景背景，2–7 经典八色，8–15 是重复的"半亮"档，16 起为扩展色 */
 export const INDEXED_COLORS: Readonly<Record<number, string>> = {
   0: '#000000', 1: '#FFFFFF', 2: '#FF0000', 3: '#00FF00', 4: '#0000FF',
   5: '#FFFF00', 6: '#FF00FF', 7: '#00FFFF',
@@ -117,14 +99,9 @@ export const INDEXED_COLORS: Readonly<Record<number, string>> = {
 /** indexed == 64（`indexed="64"`）在 Excel 里表示"系统前景色"，取黑 */
 export const SYSTEM_FOREGROUND = '#000000';
 
-/* -------------------------------------------------------------------------- */
-/* 主题色                                                                      */
-/* -------------------------------------------------------------------------- */
+/* ---- 主题色 ---- */
 
-/**
- * `a:clrScheme` 的**书写**顺序（也是 `ParsedWorkbook.themeColors` 数组的顺序）：
- * dk1, lt1, dk2, lt2, accent1..6, hlink, folHlink。
- */
+/** `a:clrScheme` 的**书写**顺序，也是 `ParsedWorkbook.themeColors` 的数组顺序 */
 export const THEME_SLOT_ORDER = [
   'dk1', 'lt1', 'dk2', 'lt2',
   'accent1', 'accent2', 'accent3', 'accent4', 'accent5', 'accent6',
@@ -132,29 +109,10 @@ export const THEME_SLOT_ORDER = [
 ] as const;
 
 /**
- * ⚠️ 样式里 `theme="N"` 的 N **不是** `clrScheme` 的书写下标：前两个槽位整体错位。
- *
- * | `theme="N"` | 主题槽位 | Office 名称 |
- * | --- | --- | --- |
- * | 0 | lt1 | Background 1 |
- * | 1 | dk1 | Text 1 |
- * | 2 | lt2 | Background 2 |
- * | 3 | dk2 | Text 2 |
- * | 4..9 | accent1..6 | Accent 1..6 |
- * | 10 | hlink | Hyperlink |
- * | 11 | folHlink | Followed Hyperlink |
- *
- * 即：下标顺序是 `lt1, dk1, lt2, dk2, accent1..6, hlink, folHlink`，
- * 而 `clrScheme` 的**书写**顺序是 `dk1, lt1, dk2, lt2, accent1..6, hlink, folHlink`
- * —— 只有第 1、2 位互换，其余一一对应。
- *
- * 依据（全部来自实测真实 Excel 文件，不是推测）：
- * - 默认字体写 `<color theme="1"/>` 且渲染为**黑** → 1 = dk1；
- * - 白底纯色填充写 `<fgColor theme="0"/>` → 0 = lt1；
- * - 实测本解析器输出：`theme=2` -> lt2(#EEECE1)、`theme=3` -> dk2(#1F497D)、
- *   `theme=9` 出现在 `<fgColor>`（accent6 填充）→ 4..11 与书写顺序一一对应。
- *
- * 忽略第 1、2 位的互换会导致"黑字变白、白底变黑"这类灾难性颜色反转。
+ * ⚠️ 样式里 `theme="N"` 的 N **不是** `clrScheme` 的书写下标：前两个槽位整体互换
+ * —— 0=lt1(背景1)、1=dk1(文字1)、2=lt2、3=dk2、4..9=accent1..6、10=hlink、11=folHlink，
+ * 而 `clrScheme` 的书写顺序是 dk1, lt1, dk2, lt2, ...（仅第 1、2 位互换）。
+ * 忽略它会得到"黑字变白、白底变黑"这类颜色反转。
  */
 const THEME_INDEX_TO_SLOT: readonly number[] = [1, 0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
 
@@ -241,9 +199,7 @@ const SYSTEM_COLOR_MAP: Readonly<Record<string, string>> = {
   infoBk: '#FFFFE1',
 };
 
-/* -------------------------------------------------------------------------- */
-/* 颜色工具                                                                    */
-/* -------------------------------------------------------------------------- */
+/* ---- 颜色工具 ---- */
 
 export function parseHexColor(raw: string): string | undefined {
   let s = raw.trim();
@@ -313,10 +269,8 @@ export function hslToHex(h: number, s: number, l: number): string {
 }
 
 /**
- * Excel 的 tint 变换（与 OOXML `@tint` 语义一致）：
- * - tint < 0：亮度按 (1 + tint) 缩放（变暗）
- * - tint > 0：亮度向 1（白）插值 lum * (1 - tint) + tint（变亮）
- * - 色相不变，饱和度在变亮时按 (1 - tint) 缩放
+ * Excel 的 tint 变换（同 OOXML `@tint`）：tint<0 变暗（亮度 ×(1+tint)）；tint>0 变亮
+ * （向白插值，饱和度 ×(1-tint)）；色相不变。
  */
 export function applyTint(hex: string, tint: number): string {
   if (!Number.isFinite(tint) || tint === 0) return hex;
@@ -340,10 +294,7 @@ export interface ColorContext {
   themeColors?: readonly string[];
   warn: (msg: string) => void;
 }
-/**
- * 解析一个颜色元素（`<color>` / `<fgColor>` / `<bgColor>` / `<font><color>`）的属性。
- * 支持 rgb / indexed / theme+tint / auto。
- */
+/** 解析颜色元素（`<color>`/`<fgColor>`/`<bgColor>`）的属性，支持 rgb / indexed / theme+tint / auto */
 export function parseColorElement(attrs: XmlAttributes, ctx: ColorContext): string | undefined {
   const rgb = attrs['rgb'];
   if (rgb !== undefined && rgb !== '') {
@@ -394,9 +345,7 @@ function numericTint(attrs: XmlAttributes): number {
   return Number.isFinite(t) ? t : 0;
 }
 
-/* -------------------------------------------------------------------------- */
-/* 边框 / 字体 / 填充 / 对齐                                                   */
-/* -------------------------------------------------------------------------- */
+/* ---- 边框 / 字体 / 填充 / 对齐 ---- */
 
 /** OOXML 边框线型 -> 契约里的 13 种（其中 hair/slantDashDot 等保持原样） */
 const BORDER_STYLE_MAP: Readonly<Record<string, BorderLineStyle>> = {
@@ -525,10 +474,8 @@ function parseFill(xml: string, el: ElementRange, ctx: ColorContext): ParsedFill
         return color ? { fill: color } : {};
       }
       /**
-       * `gray125` 是 **ECMA-376 里与 `none` 并列的默认占位填充**：Excel/WPS 几乎每个文件都会
-       * 写一个 `fills[1] = gray125`，而绝大多数文件根本没有单元格引用它。
-       * 以前这里当场记 warning，于是用户导入座位表时状态栏无端出现"降级 1 项"（实测反馈）。
-       * 现在只**记录**原因，等 cellXfs 解析完、确认真的被某个单元格样式引用时才上报。
+       * `gray125` 是与 `none` 并列的默认占位填充，几乎每个文件都有却极少被引用；只记录原因，
+       * 等确认真被 cellXfs 引用时才上报，避免无端的"降级 1 项"。
        */
       if (pattern === 'gray125') {
         return { issue: '填充 patternType="gray125"（12.5% 灰点阵）未渲染，该格按无填充显示（本工具只画纯色填充）' };
@@ -569,15 +516,11 @@ function parseAlignment(xml: string, xfEl: ElementRange, style: ParsedStyle): vo
   if (rotation !== undefined && rotation !== 0) style.textRotation = rotation;
 }
 
-/* -------------------------------------------------------------------------- */
-/* 主入口                                                                      */
-/* -------------------------------------------------------------------------- */
+/* ---- 主入口 ---- */
 
 /**
- * 按**本地名精确**查找第一个元素。
- *
- * `findFirstElement` 用 `indexOf` 顺序扫描，而 `cellStyleXfs` 的后缀恰好是 `cellXfs`，
- * 因此像 `<cellStyleXfs>` 排在 `<cellXfs>` 之前的文档会命中错的容器。这里多校验一次精确名。
+ * 按**本地名精确**查找第一个元素：`cellStyleXfs` 的后缀恰好是 `cellXfs`，
+ * 用 `indexOf` 顺序扫描会命中错的容器，所以这里多校验一次精确名。
  */
 function findExactElement(xml: string, local: string): ElementRange | undefined {
   let found: ElementRange | undefined;
@@ -589,22 +532,15 @@ function findExactElement(xml: string, local: string): ElementRange | undefined 
   return found;
 }
 
-/* -------------------------------------------------------------------------- */
-/* 条件格式差异样式：<dxfs>                                                     */
-/* -------------------------------------------------------------------------- */
+/* ---- 条件格式差异样式：<dxfs> ---- */
 
 /**
  * `xl/styles.xml` 的 `<dxfs>` -> `CfDxfStyle[]`（下标 == `cfRule/@dxfId`）。
  *
- * 与普通 `<fill>` 最容易踩的坑：**dxf 的 solid 填充底色写在 `<bgColor>`**，
- * 而普通 fill 的 solid 底色写在 `<fgColor>`（两者语义相反）。
- * 实测 fixture-rules.xlsx：`<dxf><fill><patternFill patternType="solid"><bgColor rgb="FFFFC7CE"/>`
- * 在 Excel 里渲染成浅红底；若照普通 fill 取 fgColor，会拿到"未写 = 黑色"，
- * 于是"浅红底红字"变成"黑底红字"。因此这里**以 bgColor 为准**（bgColor 缺失才退回 fgColor）。
- *
- * 只保留契约里有的字段（bold/italic/strikeThrough/color/fill/border），
- * 其余（`<numFmt>`、`<alignment>`、`<protection>`、`<u>`）忽略；空的 `<dxf/>` 也占一个下标，
- * 保证 `dxfId` 与数组下标严格对齐。
+ * 与普通 `<fill>` 最容易踩的坑：**dxf 的 solid 填充底色写在 `<bgColor>`**，普通 fill 却在
+ * `<fgColor>`（语义相反）。照普通 fill 取 fgColor 会拿到"未写 = 黑色"，"浅红底红字"就变成
+ * "黑底红字"，所以这里以 bgColor 为准（缺失才退回 fgColor）。
+ * 只保留契约里有的字段；空的 `<dxf/>` 也占一个下标，保证 `dxfId` 与数组下标严格对齐。
  */
 export function parseDxfStyles(stylesXml: string | undefined, opts: ParseStylesOptions): CfDxfStyle[] {
   if (!stylesXml) return [];
@@ -722,11 +658,7 @@ export function parseStyles(stylesXml: string | undefined, opts: ParseStylesOpti
     }
   }
 
-  /**
-   * 注意：**不能**用 `findFirstElement(xml, 'cellXfs')` —— 它会先命中 `cellStyleXfs`
-   * （`cellStyleXfs` 的后缀正是 `cellXfs`）。必须精确区分这两个容器：
-   * 只有 `cellXfs` 的下标才是单元格 `c/@s` 引用的样式索引。
-   */
+  /** 不能用 `findFirstElement(xml,'cellXfs')`——它会先命中 `cellStyleXfs`，只有它的下标才是 `c/@s` */
   for (const holderName of ['cellStyleXfs', 'cellXfs'] as const) {
     const holder = findExactElement(stylesXml, holderName);
     if (!holder) continue;
@@ -738,15 +670,7 @@ export function parseStyles(stylesXml: string | undefined, opts: ParseStylesOpti
 
   const cellXfDefs = xfDefs.filter((d) => d.source === 'cellXfs');
 
-  /**
-   * 只对**真的被用到**的填充上报"画不出来"。
-   *
-   * 用户实测反馈：导入座位表时状态栏出现"降级 1 项"，点开一看是
-   * `patternFill patternType="gray125" 暂不支持` —— 而这个 gray125 是 Excel/WPS 写进
-   * `fills[1]` 的规范占位填充，全表没有任何 `xf` 引用它（实测：25 个 cellXfs 全是 fillId=0）。
-   * 也就是说这条"降级"完全不影响预览，纯属噪音。现在改成按引用关系上报：
-   * 没被引用的填充只是躺在 styles.xml 里，既不画也不报警。
-   */
+  /** 只对真被 cellXfs 引用的填充上报"画不出来"：gray125 等占位填充无人引用，报了纯属噪音 */
   const referencedFills = new Set<number>();
   for (const def of cellXfDefs) {
     if (def.rawStyle.fillId !== undefined) referencedFills.add(def.rawStyle.fillId);

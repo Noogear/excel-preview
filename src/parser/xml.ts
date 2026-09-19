@@ -1,23 +1,11 @@
 /**
- * 极简 XML 词法工具（无 DOM、无第三方依赖）。
- *
- * 设计要点：
- * - 基于索引的单遍扫描。游标只前进，元素树按需构建（`visitElements` 提供零分配遍历）。
- * - 每棵元素子树记录其原文区间 `[openStart, closeEnd)`，几乎全部对外 API 都在这个区间上做
- *   子串操作，因此不需要为每个节点复制字符串，也不会产生海量临时字符串。
- * - 标签名/属性名**保留原始写法**（含命名空间前缀，如 `x:worksheet`、`r:id`）。
- * - 支持 `&amp; &lt; &gt; &quot; &apos;` 与十进制/十六进制数字实体。
- * - 容错：不匹配的结束标签、未闭合的标签、注释/PI/CDATA 都不会抛异常，最坏情况是提前结束扫描。
- *
- * 之所以不用 `DOMParser`：解析器要能在 Node / Worker / 无 DOM 环境运行，且需要保留 raw 原文
- * （后续"外科式修补导出"要按字节区间改写 XML）。
+ * 极简 XML 词法工具（无 DOM、无第三方依赖）：基于索引的单遍扫描，子树只记录原文区间
+ * `[openStart, closeEnd)`，对外 API 都在该区间上做子串操作。名字保留原始写法（含命名空间前缀）。
+ * 容错：标签不平衡/未闭合、注释、PI、CDATA 都不抛异常，最坏只是提前结束扫描。
+ * 不用 `DOMParser`：需在无 DOM 环境运行，且要保留 raw 原文（导出时按字节区间改 XML）。
  */
 
-/**
- * 常用字符的 charCode 常量。
- * 刻意用普通对象而不是 `const enum`：`const enum` 在 isolatedModules / Node 原生 TS
- * 等"只擦除类型"的工具链下不可用，而扫描器只需要几个内联常量。
- */
+/** 常用字符 charCode；用普通对象而非 `const enum`（后者在 isolatedModules / 原生 TS 下不可用） */
 const Ch = {
   Lt: 60, // <
   Gt: 62, // >
@@ -50,12 +38,7 @@ const NAME_STOP = new Set<number>([
 /** 单次遍历的最大步数保护（脏数据兜底，正常 XML 远达不到） */
 const MAX_VISIT_STEPS = 5_000_000;
 
-/**
- * 标签名停止符的内联判定。
- *
- * 原来用 `NAME_STOP.has(c)`（Set 查找）：名字扫描是**每个元素**都要跑的逐字符循环，
- * 百万级单元格下这里会被调用上千万次，Set 的哈希查找比直接比较慢一个档次（实测占比可观）。
- */
+/** 标签名停止符内联判定：名字扫描是逐字符热循环，直接比较比 `Set.has` 快一个档次（须与 `NAME_STOP` 一致） */
 function isNameStop(c: number): boolean {
   return c === Ch.Space || c === Ch.Tab || c === Ch.Lf || c === Ch.Cr || c === Ch.Slash || c === Ch.Gt || c === Ch.Eq;
 }
@@ -67,16 +50,12 @@ function isWs(c: number): boolean {
 /**
  * 从 `from` 开始找 `</name ...>` 的起始位置。
  *
- * 注意：**不能**直接用 `indexOf('</' + name)`——那会把 `</rPr>` 当成 `</r>` 的结束标签
- * （`<r>` 是 `<rPr>` 的前缀，ExcelJS 产出的富文本 `<r><rPr>` 正好踩这个坑）。
- * 这里要求名字之后紧跟 `>` 或空白，才能算命中。
+ * 不能直接用 `indexOf('</' + name)`：那会把 `</rPr>` 当成 `</r>` 的结束标签
+ * （`<r>` 是 `<rPr>` 的前缀，ExcelJS 富文本 `<r><rPr>` 正好踩这个坑）；
+ * 必须要求名字之后紧跟 `>` 或空白才算命中。
  */
-/**
- * `'</' + name` 的缓存。
- *
- * 每个非自闭合元素都要构造一次结束标签前缀；百万级单元格下这是上百万次临时字符串分配。
- * 标签名种类是个位数，缓存后彻底消除这部分分配与 GC 压力（上限纯粹是防脏数据撑爆内存）。
- */
+
+/** `'</' + name` 的缓存：消除上百万次临时字符串分配；上限防脏数据撑爆内存 */
 const CLOSE_TAG_CACHE = new Map<string, string>();
 const CLOSE_TAG_CACHE_MAX = 256;
 
@@ -107,10 +86,6 @@ export function findCloseTag(xml: string, name: string, from: number, limit: num
   }
 }
 
-/* -------------------------------------------------------------------------- */
-/* 实体解码                                                                    */
-/* -------------------------------------------------------------------------- */
-
 const ENTITY_TABLE: ReadonlyMap<string, string> = new Map<string, string>([
   ['amp', '&'],
   ['lt', '<'],
@@ -132,7 +107,6 @@ function codePointToString(cp: number): string {
 function decodeEntity(raw: string): string {
   if (raw.length === 0) return '';
   if (raw.charCodeAt(0) === Ch.Hash) {
-    // &#10; / &#x41;
     const isHex = raw.length > 1 && (raw.charCodeAt(1) === Ch.LowerX || raw.charCodeAt(1) === Ch.UpperX);
     const digits = raw.slice(isHex ? 2 : 1);
     const cp = isHex ? Number.parseInt(digits, 16) : Number.parseInt(digits, 10);
@@ -166,10 +140,6 @@ export function decodeEntities(text: string): string {
   }
   return out;
 }
-
-/* -------------------------------------------------------------------------- */
-/* 属性解析                                                                    */
-/* -------------------------------------------------------------------------- */
 
 export function parseAttrs(xml: string, start: number, end: number): XmlAttributes {
   const attrs: XmlAttributes = {};
@@ -205,13 +175,8 @@ export function parseAttrs(xml: string, start: number, end: number): XmlAttribut
   return attrs;
 }
 
-/* -------------------------------------------------------------------------- */
-/* 零分配遍历                                                                  */
-/* -------------------------------------------------------------------------- */
-
 export interface ElementRange {
   name: string;
-  /** 开始标签的 `<` 在原文中的偏移 */
   openStart: number;
   /** 开始标签 `>` 之后一位 */
   openEnd: number;
@@ -232,45 +197,29 @@ export interface VisitCtx {
 export type ElementVisitor = (el: ElementRange, ctx: VisitCtx) => boolean | void;
 
 export interface VisitOptions {
-  /** true = 回调返回 false 时跳过该元素的子树（默认 true） */
   pruneOnFalse?: boolean;
   /** 只访问这些名字的元素；前缀无关（`x:sheetData` 也能被 `sheetData` 命中）；缺省访问全部 */
   names?: ReadonlySet<string>;
   /** 与 `names` 联合判断是否命中（给了 `match` 就忽略 `names`） */
   match?: (name: string) => boolean;
-  /** 扫描起点（默认 0）。用于在**原始 xml 坐标系**里只扫某个区间，免去切片 */
+  /** 扫描起点（默认 0）。在**原始 xml 坐标系**里只扫某个区间，免去切片 */
   from?: number;
   /** 扫描终点（开区间，默认 xml.length） */
   to?: number;
-  /**
-   * 只扫**直接子元素**（深度 1）：
-   * 遇到开始标签就整棵跳过，遇到结束标签就收工。
-   * 这样 `childElements` 不必先 `slice` 出一段子串再折算偏移。
-   */
+  /** 只扫**直接子元素**（深度 1）：遇到开始标签整棵跳过，遇到结束标签收工 */
   depthLimit?: boolean;
-  /**
-   * 命中第一个元素并回调完就**结束整趟遍历**。
-   *
-   * `findFirstElement` 必须开这个：否则回调返回 false 只是"跳过该子树"，
-   * 遍历仍会把整份文档走完——对 50MB 的 sheet XML（四百万个元素）来说，
-   * 每次"找第一个 X"都变成一次全量扫描，实测这是解析耗时的大头。
-   */
+  /** 命中第一个元素并回调完就**结束整趟遍历**（否则返回 false 只跳过该子树，仍会走完整份文档） */
   stopOnFirstMatch?: boolean;
 }
 
 /**
- * 单遍扫描 XML 的事件式遍历：深度优先，回调返回 `false` 时跳过该元素整棵子树。
- * 不构建树、不为每个元素建对象（只构造一个轻量 `ElementRange`）。
- *
- * 索引约定：扫描器只在"标签"上落点——每处理完一个标签就把游标挪到它开头之后，
- * 下一轮 `indexOf('<')` 自然会越过文本内容。同一个 `<` 不会被处理两次（唯一的
- * 例外是上一轮 `indexOf` 找不到下一个标签时 `lt` 变成 -1，循环随即结束）。
+ * 单遍扫描的事件式遍历：深度优先，回调返回 `false` 时跳过该元素整棵子树。
+ * 只在"标签"上落点，每处理完一个标签就把游标挪到它开头之后，同一个 `<` 不会被处理两次。
  */
 export function visitElements(xml: string, visit: ElementVisitor, opts: VisitOptions = {}): boolean {
   const len = xml.length;
   const { pruneOnFalse = true, names, match, depthLimit = false, stopOnFirstMatch = false } = opts;
 
-  // 起止位置都在**原始 xml** 坐标系里，不做任何折算
   const visitRange = (s: number, e: number): void => {
     let i = s;
     let guard = 0;
@@ -280,7 +229,6 @@ export function visitElements(xml: string, visit: ElementVisitor, opts: VisitOpt
       if (lt < 0 || lt >= e) return;
       const nx = xml.charCodeAt(lt + 1);
 
-      // 注释 / 处理指令 / DOCTYPE / CDATA
       if (nx === Ch.Bang) {
         if (xml.startsWith('<![CDATA[', lt)) {
           const end = xml.indexOf(']]>', lt + 9);
@@ -308,13 +256,13 @@ export function visitElements(xml: string, visit: ElementVisitor, opts: VisitOpt
         continue;
       }
 
-      // 标签名（保留原始写法，含命名空间前缀）
+      // 标签名保留原始写法（含命名空间前缀）
       const nameStart = lt + 1;
       let nameEnd = nameStart;
       while (nameEnd < e && !isNameStop(xml.charCodeAt(nameEnd))) nameEnd++;
       const name = xml.slice(nameStart, nameEnd);
 
-      // 开始标签的 `>`（跳过引号内的内容）
+      // 跳过引号内的内容，找到开始标签的 `>`
       let q = nameEnd;
       let quote = 0;
       let gt = -1;
@@ -332,13 +280,11 @@ export function visitElements(xml: string, visit: ElementVisitor, opts: VisitOpt
       }
       if (gt < 0) return; // 标签未闭合
 
-      // `/>` -> 自闭合
       let back = gt - 1;
       while (back > nameEnd && isWs(xml.charCodeAt(back))) back--;
       const selfClosing = xml.charCodeAt(back) === Ch.Slash;
       const attrEnd = selfClosing ? back : gt;
 
-      // 结束标签位置（自闭合元素直接等于 openEnd）
       let closeEnd = gt + 1;
       if (!selfClosing) {
         const found = findCloseTag(xml, name, gt + 1, e);
@@ -384,7 +330,6 @@ export function visitElements(xml: string, visit: ElementVisitor, opts: VisitOpt
   return true;
 }
 
-/** 找出所有名字等于 `name` 的元素（任意深度），返回轻量区间对象数组 */
 export function findElements(xml: string, name: string): ElementRange[] {
   const out: ElementRange[] = [];
   visitElements(xml, (el) => { out.push(el); }, { names: new Set([name]) });
@@ -393,11 +338,8 @@ export function findElements(xml: string, name: string): ElementRange[] {
 
 /**
  * 找某个名字（含带前缀写法）在 XML 里**最早**出现的位置；两种写法都没有时返回 `fallback`。
- *
- * 用途：带前缀的现代写法（`<x:conditionalFormatting>`）不会被 `indexOf('<conditionalFormatting')`
- * 命中，所以两种都要查；查得到就从那里开始扫，查不到就说明这份 XML 里根本没有该元素，
- * 直接从 `fallback` 起步即可（`fallback` 之后必然也不会有）。
- * 代价只有两次原生 indexOf，换来的是"不必为每个特性各走一趟全文档"。
+ * 带前缀的写法（`<x:conditionalFormatting>`）不会被 `indexOf('<conditionalFormatting')` 命中，
+ * 所以两种都要查；代价只有两次原生 indexOf，省掉"为每个特性各走一趟全文档"。
  */
 export function earliestNameAt(xml: string, localName: string, fallback: number): number {
   // 快路径：元素就在尾段里（正常文件都如此）——只扫尾段，代价几乎为零
@@ -425,11 +367,8 @@ export function findFirstElement(xml: string, name: string, from = 0): ElementRa
 }
 
 /**
- * 某个元素的**直接**子元素（子元素的子元素不会出现在结果里）。
- *
- * 用 `depthLimit` 在**原始 xml** 上直接扫：不再 `slice` 出子串，也不需要把偏移折算回外层
- * 坐标系。每个单元格都调一次 childElements，旧实现的"切片 + 每子节点展开对象 + 重新折算"
- * 在百万格规模下是实打实的开销。
+ * 某个元素的**直接**子元素（不含孙子）。用 `depthLimit` 在原始 xml 上直接扫：不切子串、
+ * 不把偏移折算回外层坐标系（每格都调一次，切片 + 展开对象在百万格规模下开销可观）。
  */
 export function childElements(xml: string, el: ElementRange): ElementRange[] {
   const out: ElementRange[] = [];
@@ -468,15 +407,13 @@ function stripCloseTag(inner: string, name: string): string {
   const closeIdx = inner.lastIndexOf('</');
   if (closeIdx < 0) return inner;
   const tail = inner.slice(closeIdx);
-  // 只有形如 </name ...> 或 </x:name> 才剥离
   const m = /^<\/\s*([^\s>]+)\s*>$/.exec(tail);
   if (!m) return inner;
   return nameMatches(m[1], localName(name)) ? inner.slice(0, closeIdx) : inner;
 }
 
 /**
- * 读取元素的文本内容：剥离所有内层标记（含 CDATA），解码实体。
- * 对 `<v>123</v>`、`<t>a&amp;b</t>` 这类叶子元素是快路径。
+ * 读取元素文本：剥离所有内层标记（含 CDATA）并解码实体；`<v>123</v>` 这类叶子元素走快路径。
  */
 export function elementText(xml: string, el: ElementRange): string {
   if (el.selfClosing) return '';
@@ -514,7 +451,6 @@ export function stripTags(raw: string): string {
   return out;
 }
 
-/** 便捷读取：XML 中第一个 `name` 元素的文本 */
 export function firstElementText(xml: string, name: string): string | undefined {
   const el = findFirstElement(xml, name);
   return el ? elementText(xml, el) : undefined;

@@ -1,7 +1,7 @@
 /**
  * 拖拽会话控制器：把"长按判定 / 幽灵绘制 / 落点命中 / 落点决策"串起来。
  *
- * 依赖的三条已实测事实（见 p0-findings.md）：
+ * 依赖的三条已实测事实：
  *  1. 按住鼠标拖动时 Univer 会持续派发 `CellPointerMove`，并给出真实 `{row, column}` → 落点命中靠它；
  *  2. 拖动过程中 Univer 原生的 `SelectionMove*` 不会触发 → 不存在手势冲突；
  *  3. 外部 DOM 拖放（HTML5 DnD）不可靠 → 侧边栏拖回也用 pointer 事件走同一套命中逻辑。

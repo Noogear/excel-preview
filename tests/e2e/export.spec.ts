@@ -1,12 +1,12 @@
 /**
- * 外科式导出（合并自原 p1-import-fidelity.spec.ts ③ 与 p3-constraints.spec.ts 约束②）。
+ * 外科式导出。
  *
- * 契约只有两条，但都很硬：
+ * 契约两条：
  *   ① 改动过的单元格值必须写回导出的 xlsx（并且导出文件能被自研解析器重新读出来）
  *   ② 未改动的部件必须**逐字节保留**——绘图/批注/媒体/样式等只读元素一个字节都不能动、也不能丢
  *
- * 之所以用 fixture-extras.xlsx：它同时带着图片（drawing/media）、批注（comments）与超链接 rels，
- * 是"只读元素原样保留"最严格的样本；白名单之外的一切部件都比对字节。
+ * 用 fixture-extras.xlsx：它同时带图片（drawing/media）、批注（comments）与超链接 rels，
+ * 是"只读元素原样保留"最严格的样本。特性层面的完整验证见 `export-fidelity.spec.ts`。
  */
 import { expect, test } from '@playwright/test';
 import { existsSync, readFileSync } from 'node:fs';

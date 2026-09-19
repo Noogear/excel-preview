@@ -1,31 +1,14 @@
 /**
- * 外科式修补导出：把预览里的单元格编辑写回原 xlsx。
+ * 外科式修补导出：只重写被编辑工作表的 sheet XML、只追加 sharedStrings 的 <si>、只补
+ * workbook.xml 的 <calcPr>，其余 zip 条目逐字节原样写回——图表、透视表、形状、条件格式、
+ * VBA 等未解析部件不会被"重新序列化"破坏；sheetData 之外的正文字节也保持原文。入参只读。
  *
- * 设计原则
- * --------
- * 1. **只重写必须改的部件**：被编辑工作表的 `xl/worksheets/sheetN.xml`、
- *    `xl/sharedStrings.xml`（且只**追加** `<si>`）、`xl/workbook.xml`（只动 `<calcPr>`）。
- *    其余 zip 条目**逐字节原样写回**——图表、透视表、形状、条件格式、VBA 等我们没解析的
- *    部件因此不会被"重新序列化"破坏。
- * 2. **按 row / cell 定位的区间拼接**：不做整篇 XML 的正则替换，`sheetData` 之外的所有
- *    字节（`<cols>`、`<mergeCells>`、`<pageSetup>`、`<extLst>`…）保持原文。
- * 3. **不改动入参**：`source.raw.entries` / `source.sheets` 只读，输出是全新的 `Uint8Array`。
+ * <dimension> 只在编辑目标越出原范围时才扩成最小外接矩形：写小了会让 Excel 误判工作表尺寸
+ * （滚动条、选区、"需要修复"提示），每次都重算又会白白改动范围内的普通编辑。
  *
- * `<dimension>` 策略（题目允许二选一，这里选"按需扩展"）
- * ------------------------------------------------------
- * 当且仅当存在**落在原 dimension 之外**的编辑目标时，才把 `ref` 扩成
- * 「原范围 ∪ 本次编辑坐标」的最小外接矩形；只改/清空范围内单元格时 `<dimension>` 一个
- * 字节都不动。理由：dimension 是给读取方的提示，写小了会让 Excel 误判工作表尺寸
- * （滚动条、选区、个别版本提示"需要修复"）；而每次都重算又会让范围内的普通编辑白白
- * 多改一段本来不必改的字节。
- *
- * 已知取舍
- * --------
- * - 新增单元格不带 `s` 样式属性（编辑模型里没有"新单元格样式"这一项，凭空造一个会污染
- *   styles.xml；如需样式请由调用方在导入侧先把样式格子建出来）。
- * - 写公式时不写缓存值：属于该格子的旧 `<v>` 缓存已失效、会被删除，重算交给
- *   `<calcPr fullCalcOnLoad="1"/>`。
- * - 字符串一律走共享字符串表（`t="s"`）；命中已有相同文本则复用其索引，否则追加到末尾。
+ * 取舍：新单元格不带 s 样式（编辑模型没有这项，凭空造会污染 styles.xml）；写公式不写缓存值
+ * （旧 <v> 已失效会被删除，重算交给 fullCalcOnLoad）；字符串一律走共享字符串表，命中相同文本
+ * 则复用索引，否则追加到末尾。
  */
 import { zipSync, strFromU8, strToU8 } from 'fflate';
 
@@ -39,9 +22,7 @@ import type { ElementRange } from '../parser/xml';
 import type { ParsedCell, ParsedSheet, ParsedWorkbook } from '../parser/types';
 import { readZipEntries } from '../parser/zip';
 
-/* -------------------------------------------------------------------------- */
 /* 对外契约                                                                    */
-/* -------------------------------------------------------------------------- */
 
 export interface CellEdit {
   row: number;            // 0-based
@@ -50,32 +31,17 @@ export interface CellEdit {
   value?: string | number | boolean | null;
   /** 新公式，不含前导 '='；null 表示删除公式 */
   formula?: string | null;
-  /**
-   * 字符串是否强制走共享字符串表（默认自动：能复用到就复用，否则追加）。
-   *
-   * 说明：本实现里字符串**始终**写入共享字符串表（`t="s"`）——这样复用与去重
-   * 是同一个逻辑，也不会为了一个格子去改写 `styles.xml` 之外的部件。
-   * 唯一不走共享字符串表的情况是"公式的字符串结果缓存"（`t="str"`，值必须内联），
-   * 那种情况传 `true` 也不会改变行为（规范不允许把公式结果放进共享字符串表）。
-   */
+  /** 字符串是否强制走共享字符串表。本实现里字符串始终写 SST（t="s"），复用与去重是同一段逻辑；
+   *  唯一例外是公式的字符串结果缓存（t="str"，规范要求内联），此时传 true 也不改变行为。 */
   forceSharedString?: boolean;
 }
 
 export interface SheetEdits { sheetId: string; cells: CellEdit[] }
 
-/**
- * 导出所需的**最小**数据源。
- *
- * 为什么要有这个类型：完整 `ParsedWorkbook` 里百万个 `ParsedCell` 对象是常驻内存的大头，
- * 而外科式导出真正用到的只有三样——zip 条目、`sheet.id`、以及"每行第一个带样式的 s"
- * （`collectRowStyles` 用给新格子补样式）。所以导入完成后可以把模型瘦身成这个形状
- * （见 `slimForExport`），内存降下来，导出结果一字不差。
- *
- * 两种给条目的方式：
- * - `raw.entries`：已经在内存里（直接把完整 `ParsedWorkbook` 传进来时走这条）；
- * - `bytes`：原始 xlsx 字节，导出时**惰性解压**。瘦身路径用这个——省下几十 MB 常驻内存，
- *   代价是每次导出多花一次解压（6 MB 文件实测约 0.2 s）。
- */
+/** 导出所需的**最小**数据源：ParsedWorkbook 里百万个 ParsedCell 是常驻内存大户，而外科式导出
+ * 只用到 zip 条目、sheet.id 与"每行第一个带样式的 s"（给新格子补样式），故可瘦身成此形状。
+ * 条目来源二选一：内存里的 raw.entries，或原始 bytes（导出时**惰性解压**，省几十 MB 常驻内存，
+ * 代价是每次导出多一次解压，6 MB 文件实测约 0.2 s）。 */
 export interface ExportSource {
   raw?: { entries: ZipEntries };
   bytes?: Uint8Array;
@@ -112,9 +78,7 @@ const MAX_COL = 16_384;
 const XML_DECL = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\r\n';
 const SST_NAMESPACE = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main';
 
-/* -------------------------------------------------------------------------- */
 /* 主入口                                                                      */
-/* -------------------------------------------------------------------------- */
 
 /** 返回新的 xlsx 字节；不改动入参 */
 export function exportXlsx(
@@ -172,8 +136,7 @@ export function exportXlsx(
   // 5) 按原始条目顺序重建 zip：没命中的条目原字节写回，命中的换成新字节
   const out: ZipEntries = {};
   for (const name of Object.keys(entries)) out[name] = replaced.get(name) ?? entries[name];
-  // 兜底：条目名大小写/前导斜杠写法与替换表 key 不一致时补进去（不改顺序）；
-  // 只有 findEntry 确认"压根没有这个条目"时才追加，避免写出重名条目
+  // 兜底：条目名大小写/前导斜杠写法与替换表 key 不一致时补进去（不改顺序），且仅在 findEntry 确认确实没有该条目时追加，避免重名
   for (const [name, bytes] of replaced) {
     if (name in out || findEntry(entries, name)) continue;
     out[name] = bytes;
@@ -181,14 +144,9 @@ export function exportXlsx(
   return zipSync(out);
 }
 
-/* -------------------------------------------------------------------------- */
 /* 部件定位                                                                    */
-/* -------------------------------------------------------------------------- */
 
-/**
- * `ParsedSheet.id` 是 workbook.xml 里的 `r:id`（如 `rId4`）；
- * 这里顺着 `_rels/.rels` -> workbook.xml -> workbook.xml.rels 把它解析成 zip 条目名。
- */
+/** ParsedSheet.id 是 workbook.xml 里的 r:id（如 rId4）；顺着 _rels/.rels -> workbook.xml -> workbook.xml.rels 解析出 zip 条目名 */
 function resolveSheetEntry(entries: ZipEntries, sheetId: string): string {
   const workbookEntry = resolveWorkbookEntry(entries);
   const workbookBytes = findEntry(entries, workbookEntry);
@@ -253,9 +211,7 @@ function resolveWorkbookEntry(entries: ZipEntries): string {
   return DEFAULT_WORKBOOK_PATH;
 }
 
-/* -------------------------------------------------------------------------- */
 /* 编辑归一化                                                                  */
-/* -------------------------------------------------------------------------- */
 
 function resolveEdits(sheetEdits: SheetEdits): ResolvedEdit[] {
   const out: ResolvedEdit[] = [];
@@ -285,9 +241,7 @@ function dedupeEdits(list: ResolvedEdit[]): ResolvedEdit[] {
   return [...byKey.values()];
 }
 
-/* -------------------------------------------------------------------------- */
 /* 工作表 XML 修补                                                             */
-/* -------------------------------------------------------------------------- */
 
 function patchWorksheetXml(
   xml: string,
@@ -335,12 +289,10 @@ function patchWorksheetXml(
   newRows.sort((a, b) => a.rowIndex - b.rowIndex);
 
   const inner = xml.slice(sheetData.openEnd, innerEnd(xml, sheetData));
-  // 注意：rowResults 里的区间是**整篇 xml** 的坐标，而 inner 是从 openEnd 开始的切片，
-  // 所以要减去基准偏移再交给 rebuildSheetData（否则会按错位置切片，导致整行重复）。
+  // rowResults 的区间是整篇 xml 坐标，而 inner 从 openEnd 开始，必须减去基准偏移再交给 rebuildSheetData，否则会按错位置切片导致整行重复
   const sheetDataInner = rebuildSheetData(inner, newRows, rowResults, sheetData.openEnd);
 
-  // 4) 拼接：sheetData 之外的所有字节原样保留；dimension 只在明显不匹配时才动
-  //    注意 `<sheetData/>` 要先展开成 `<sheetData>`，否则内容会被写到标签外面
+  // 4) 拼接：sheetData 之外字节原样保留；注意 <sheetData/> 要先展开成 <sheetData>，否则内容会写到标签外面
   const open = sheetData.selfClosing
     ? openTag(xml, sheetData).replace(/\/\s*>$/, '>')
     : openTag(xml, sheetData);
@@ -390,9 +342,7 @@ function buildCellContent(edit: ResolvedEdit, sst: SharedStringEditor): CellCont
   return { value: null, type: undefined, formula: hasFormula ? formula : undefined, sstIndex: undefined };
 }
 
-/* -------------------------------------------------------------------------- */
 /* 单个 <row> 修补                                                             */
-/* -------------------------------------------------------------------------- */
 
 function patchRow(
   xml: string,
@@ -457,8 +407,7 @@ function patchRow(
   }
   body += inner.slice(cursor);
 
-  // 行内容已被清空：只有"位置/选区提示"这类附属属性（r、spans）时整行删掉，
-  // 否则保留空行（行高、隐藏等行级信息必须留着）
+  // 行内容已清空：只剩 r、spans 这类附属属性时整行删掉，否则保留空行（行高、隐藏等行级信息必须留着）
   if (body.trim().length === 0 && !hasRowLevelInfo(rowEl)) return '';
   if (rowEl.selfClosing) {
     // 原本 <row .../>：要有新格子才展开（展开时要去掉结尾的 `/`）
@@ -482,19 +431,11 @@ function collectRowAdditions(
   return out.sort((a, b) => a.col - b.col);
 }
 
-/* -------------------------------------------------------------------------- */
 /* 单元格原文改写                                                              */
-/* -------------------------------------------------------------------------- */
 
-/**
- * 用新内容改写一个**已存在**单元格的原文。
- *
- * - 保留 `r`、`s`（样式）与 `cm`/`vm`（元数据索引，与值同生共死）；
- * - `t` 按新值类型重写：字符串 -> `t="s"`（公式字符串结果 -> `t="str"`）、布尔 -> `t="b"`、
- *   数字 -> 去掉 `t`；清空内容时保留原 `t` 以免影响同格其它属性语义（此时无 `<v>`）；
- * - `<f>` / `<v>` 换成新内容，`<is>`、`<extLst>` 等其它子元素原样保留；
- * - 返回 `null` 表示整格删除（清空后既无属性也无内容）。
- */
+/** 用新内容改写一个**已存在**单元格的原文：保留 r、s（样式）与 cm/vm（元数据，与值同生共死）；
+ * t 按新值类型重写（字符串 s / 公式字符串结果 str / 布尔 b / 数字去掉 t；清空时保留原 t），
+ * <f>、<v> 换成新内容而 <is>、<extLst> 等子元素原样保留；返回 null 表示整格删除。 */
 function rewriteCell(
   original: string,
   el: ElementRange,
@@ -551,11 +492,8 @@ function serializeRefCell(ref: string, content: CellContent, style?: number): st
   return `<c${serializeAttrs(attrs)}${kept.length === 0 ? '/>' : `>${kept.join('')}</c>`}`;
 }
 
-/**
- * 补齐样式属性。原始单元格本来没有 `s`、但同一行其它格子有样式时，
- * 沿用它（行 3 的 C/D/E/F 都该是同一档样式），否则新格子会变成"无样式的异类"。
- * 编辑模型里没有"新单元格样式"这一项，所以这是唯一能保持视觉一致的办法。
- */
+/** 补齐样式属性：原格没有 s 但同一行其它格子有样式时沿用它（第 3 行 C/D/E/F 本应同档样式），
+ * 否则新格子会变成"无样式的异类"；编辑模型没有"新单元格样式"，这是唯一保视觉一致的办法。 */
 function fillMissingStyle(attrs: AttrCollector, fallback: number | undefined): void {
   if (fallback === undefined || fallback < 0) return;
   if (attrs.entries.some(([name]) => name === 's')) return;
@@ -596,18 +534,12 @@ function renderValue(content: CellContent): string | undefined {
   return `<v>${escapeXml(value)}</v>`;
 }
 
-/* -------------------------------------------------------------------------- */
 /* 属性文本处理（只动必要的键，其它属性原样保留）                                */
-/* -------------------------------------------------------------------------- */
 
 interface AttrCollector { entries: Array<[string, string]> }
 
-/**
- * 解析开始标签里的属性（`t` 在原文里也可能写作 `type`，都认）。
- *
- * `bound` 用于限定解析范围：自闭合标签要排除结尾的 `/`，否则会被当成一个"无值属性"
- * 而写出 `c="true"` 这种垃圾属性。
- */
+/** 解析开始标签里的属性（t 也可能写作 type，都认）。bound 限定解析范围：自闭合标签要排除
+ * 结尾的 `/`，否则会被当成"无值属性"而写出 c="true" 这种垃圾属性。 */
 function parseAttrText(text: string, bound: number = text.length): AttrCollector {
   const entries: Array<[string, string]> = [];
   const end = Math.max(0, Math.min(bound, text.length));
@@ -660,16 +592,10 @@ function serializeAttrs(attrs: AttrCollector): string {
   return out;
 }
 
-/* -------------------------------------------------------------------------- */
 /* sheetData 重建                                                              */
-/* -------------------------------------------------------------------------- */
 
-/**
- * 把 `sheetData` 的内容拼回去：保留原有 `<row>` 的区间（只替换被修补的那些），
- * 并把新建的行按行号升序插到正确位置。
- *
- * `rowResults` 里的区间是整篇 XML 的坐标，`base` 是 `inner` 在整篇 XML 中的起点。
- */
+/** 把 sheetData 的内容拼回去：保留原有 <row> 的区间（只替换被修补的那些），新建行按行号
+ * 升序插到正确位置。rowResults 的区间是整篇 XML 坐标，base 是 inner 在整篇 XML 中的起点。 */
 function rebuildSheetData(
   inner: string,
   newRows: Array<{ rowIndex: number; cells: Array<{ col: number; text: string }> }>,
@@ -746,9 +672,7 @@ function hasRowLevelInfo(rowEl: ElementRange): boolean {
   return Object.keys(rowEl.attrs).some((name) => !ROW_AUX_ATTRS.has(name));
 }
 
-/* -------------------------------------------------------------------------- */
 /* dimension                                                                   */
-/* -------------------------------------------------------------------------- */
 
 /** 只有编辑目标越出原 `<dimension>` 时才扩展（策略见文件头） */
 function updateDimension(xml: string, planned: Map<string, CellContent>): string {
@@ -794,9 +718,7 @@ function updateDimension(xml: string, planned: Map<string, CellContent>): string
   return xml.slice(0, dim.openStart) + replacedTag + xml.slice(openEnd);
 }
 
-/* -------------------------------------------------------------------------- */
 /* workbook.xml: <calcPr>                                                      */
-/* -------------------------------------------------------------------------- */
 
 /** 只改 `<calcPr>`：有就补/改 fullCalcOnLoad，没有就插在 `<sheets>` 之后（schema 允许的位置） */
 function patchCalcPr(xml: string): string {
@@ -824,9 +746,7 @@ function patchCalcPr(xml: string): string {
   return xml;
 }
 
-/* -------------------------------------------------------------------------- */
 /* sharedStrings                                                               */
-/* -------------------------------------------------------------------------- */
 
 interface SharedStringEditor {
   /** 原表文本 + 本次追加的文本（索引即单元格 `<v>` 里的值） */
@@ -918,10 +838,7 @@ function parseSharedStringNodes(xml: string): SharedStringNode[] {
   return out;
 }
 
-/**
- * 追加一个 `<si><t>…</t></si>`，并同步 `<sst>` 上的 count / uniqueCount（存在才同步）。
- * `total` 是追加后的 `<si>` 总数。
- */
+/** 追加一个 <si><t>…</t></si>，并同步 <sst> 上的 count / uniqueCount（存在才同步）；total 是追加后的 <si> 总数 */
 function appendSharedString(xml: string, total: number, text: string): string {
   const root = findFirstElement(xml, 'sst');
   if (!root) return xml;
@@ -959,9 +876,7 @@ function bumpSstCounts(xml: string, total: number): string {
   return xml.slice(0, root.openStart) + tag + xml.slice(openEnd);
 }
 
-/* -------------------------------------------------------------------------- */
 /* 局部工具                                                                    */
-/* -------------------------------------------------------------------------- */
 
 function cellKey(row: number, col: number): string {
   return `${row}:${col}`;
@@ -997,13 +912,9 @@ function normalizeEntryPath(path: string): string {
   return p;
 }
 
-/**
- * 元素内容结束位置（自闭合元素等于 `openEnd`，否则等于结束标签的起点）。
- *
- * 不能用 `lastIndexOf('</', el.closeEnd)`：那是"从 closeEnd 往前找最后一个 `</`"，
- * 当元素内容以子元素结尾时（`<row r="1"><c .../></row>`）会命中**父元素的**结束标签，
- * 把 `</row>` 当成内容切出来。这里从 closeEnd 往前找匹配的 `<`，再校验标签名。
- */
+/** 元素内容结束位置（自闭合元素等于 openEnd，否则等于结束标签起点）。不能用 lastIndexOf('</', el.closeEnd)：
+ * 内容以子元素结尾时（<row r="1"><c .../></row>）它会命中**父元素的**结束标签，把 </row> 当成内容切出来；
+ * 这里从 closeEnd 往前找匹配的 '<'，再校验标签名。 */
 function innerEnd(xml: string, el: ElementRange): number {
   if (el.selfClosing || el.closeEnd <= el.openEnd) return el.openEnd;
   let at = xml.lastIndexOf('<', el.closeEnd - 1);
@@ -1049,14 +960,8 @@ function openTagEnd(text: string, from: number): number {
   return text.length;
 }
 
-/**
- * 逐次取出同名的顶层元素（`<si>` 这种可能有很多个的）。
- *
- * 注意：这里**不能**用解析层的 `findFirstElement(xml, 'si')`。它的名字匹配是
- * 「按 localName 前缀无关」的，`<sst>` / `<si>` 在标签名切分上会被混为一谈
- * （`si` 是 `sst` 的前缀），于是只会拿到根元素一个节点，索引就全错了。
- * 所以这里自己按标签名**精确匹配**扫描，并且只取最外层。
- */
+/** 逐次取出同名的顶层元素（如多个 <si>）。这里**不能**用解析层的 findFirstElement(xml,'si')：
+ * 它按 localName 前缀无关匹配，si 是 sst 的前缀，二者会被混为一谈而只拿到根元素；故自行按标签名精确匹配扫描且只取最外层。 */
 function directElements(xml: string, name: string): ElementRange[] {
   const out: ElementRange[] = [];
   for (const range of collectElements(xml, name)) {
@@ -1129,12 +1034,8 @@ function safeFromCodePoint(cp: number): string {
   }
 }
 
-/**
- * 公式正文清洗：
- * - 去掉可能混进来的前导 `=`（契约要求不含它，这里容错）；
- * - 调用方若把 `<` / `>` 写成了 XML 转义（`&lt;` / `&gt;`），这里先还原成字面量再输出，
- *   输出阶段统一由 `escapeXml` 负责转义，避免出现 `&amp;gt;` 这种双重转义。
- */
+/** 公式正文清洗：去掉可能混进来的前导 `=`（契约要求不含它，这里容错）；调用方若把 < / > 写成了
+ * &lt; / &gt; 先还原成字面量，输出统一由 escapeXml 转义，避免出现 &amp;gt; 这种双重转义。 */
 function stripFormula(formula: string): string {
   const trimmed = formula.trim();
   return decodeXmlEntities(trimmed.startsWith('=') ? trimmed.slice(1) : trimmed);

@@ -1,18 +1,7 @@
 /**
  * 「点击交换」的动画原语（纯 TS + DOM，不依赖 React / Univer）。
- *
- * 三条硬约束决定了这里的实现方式：
- *  1. Univer 是 canvas 渲染，**没有**"单元格 → 屏幕像素"的公开映射 API（只有"指针 → 单元格"）；
- *     所以交换的视觉反馈不能用自绘单元格高亮，只能用**指针坐标**（点击事件自带 clientX/clientY）
- *     做"内容芯片飞行"。本模块所有坐标都是**视口坐标**（clientX/clientY / getBoundingClientRect）。
- *  2. 所有位置**只**写 `transform`（translate3d + scale），绝不逐帧写 left/top —— 不触发 layout；
- *     位移动画直接复用 `flyIn`（它内部就是 transform + rAF）。
- *  3. DOM 与 rAF **零泄漏**：每个临时节点、帧句柄、计时器都登记在册，
- *     `dispose()` / 动画结束 / 异常路径三条路都会清空登记项并移除节点。
- *
- * 样式策略：基础样式优先来自 `swap-animation.css`（类名前缀统一 `swap-`，变量集中在顶层）；
- * 该 CSS 未被加载时（例如 e2e 宿主没 import 它）本模块注入一份**同源**兜底样式，
- * 保证动画在任何宿主里都不会退化成"没有样式的裸 div"。
+ * 关键取舍：Univer 是 canvas 渲染，没有"单元格 → 像素"映射，只能拿指针坐标做内容芯片飞行；位移只写 transform（复用 flyIn）绝不逐帧写 left/top；临时节点 / rAF / timer 全部登记，动画结束与 dispose 统一清理，零泄漏。
+ * 兜底：swap-animation.css 未加载时（如 e2e 宿主没 import）注入一份同源样式，避免动画退化成无样式裸 div。
  */
 
 import { flyIn } from './fly-in';
@@ -26,10 +15,7 @@ export interface SwapAnimationOptions {
 export interface SwapAnimation {
   /** 选中某一方时的反馈：在点击点生成一个脉动圆环（约 420ms 后自动清理） */
   pulseSelection(at: { x: number; y: number }): void;
-  /**
-   * 交换动画：两个"内容芯片"分别从 a 飞向 b、从 b 飞向 a。
-   * content 是要显示的文字（可为空字符串）；返回 Promise，动画结束（含降级路径）后 resolve。
-   */
+  /** 交换动画：两个内容芯片 a→b、b→a 对飞；返回 Promise，动画结束（含降级路径）后 resolve。 */
   playSwap(
     a: { x: number; y: number; text: string },
     b: { x: number; y: number; text: string },
@@ -42,14 +28,11 @@ export interface SwapAnimation {
   dispose(): void;
 }
 
-/* -------------------------------------------------------------------------- */
-/* 常量                                                                        */
-/* -------------------------------------------------------------------------- */
+/* 常量 */
 
 /** 类名前缀（与 swap-animation.css 严格一致） */
 export const SWAP_CLASS_PREFIX = 'swap-';
 
-/** 芯片/幽灵最多显示多少字符（超出加省略号） */
 export const SWAP_TEXT_MAX_CHARS = 24;
 
 export const DEFAULT_SWAP_DURATION_MS = 340;
@@ -78,13 +61,8 @@ const CHIP_FADE_OUT_CLASS = `${CHIP_CLASS}--fade-out`;
 const GHOST_IN_CLASS = `${GHOST_CLASS}--ghost-in`;
 const GHOST_OUT_CLASS = `${GHOST_CLASS}--ghost-out`;
 
-/**
- * 兜底样式：与 swap-animation.css 的变量/取值保持一致（CSS 已加载时声明等价，互不冲突）。
- *
- * `transition:none` 是**必须**的：位移动画由 flyIn 逐帧写 transform，
- * 如果这里挂了 transform 过渡，浏览器会把每一帧的新值当成"新的过渡目标"（retargeting），
- * 结果元素被过渡拖住、永远追不上 flyIn 的插值。位移只走 rAF，过渡只用于 opacity。
- */
+/** 兜底样式，与 swap-animation.css 的变量/取值一致（CSS 已加载时两者等价、互不冲突）。
+ *  `transition:none` 必须保留：flyIn 逐帧写 transform，若挂了 transform 过渡，浏览器会把每帧新值当成新的过渡目标（retargeting），元素被拖住永远追不上插值；过渡只用于 opacity。 */
 const BASE_CSS = [
   `.${ROOT_CLASS}{position:fixed;inset:0;pointer-events:none;z-index:var(--swap-layer-z-index,9998);}`,
   `.${CHIPS_CLASS}{position:absolute;inset:0;pointer-events:none;}`,
@@ -123,9 +101,7 @@ const BASE_CSS = [
   `@keyframes ${SWAP_CLASS_PREFIX}ring-pulse{from{opacity:.9;transform:scale(.55)}to{opacity:0;transform:scale(1.7)}}`,
 ].join('\n');
 
-/* -------------------------------------------------------------------------- */
-/* 小工具                                                                      */
-/* -------------------------------------------------------------------------- */
+/* 小工具 */
 
 type RafFn = (cb: (time: number) => void) => number;
 type CafFn = (id: number) => void;
@@ -151,7 +127,6 @@ function toClassList(className: string): string[] {
   return className.split(/\s+/).filter((part) => part.length > 0);
 }
 
-/** 追加 class；用完必须 removeClass —— 这是"不留残留 class"的配对入口。 */
 function addClass(el: Element, className: string): void {
   toClassList(className).forEach((part) => el.classList.add(part));
 }
@@ -160,10 +135,7 @@ function removeClass(el: Element, className: string): void {
   toClassList(className).forEach((part) => el.classList.remove(part));
 }
 
-/**
- * 摘要文本：数组安全地截断到 max 个**字符**（Array.from 按 code point 数，
- * 避免把 emoji 的代理对劈成两半），超出补省略号。
- */
+/** 摘要文本：按 code point 截断到 max 个字符（Array.from 避免劈开 emoji 代理对），超出补省略号。 */
 export function clampSwapText(text: string, max: number = SWAP_TEXT_MAX_CHARS): string {
   const limit = Number.isFinite(max) && max > 0 ? Math.floor(max) : SWAP_TEXT_MAX_CHARS;
   const chars = Array.from(text);
@@ -184,9 +156,7 @@ function normalizeDuration(value: number | undefined, fallback: number): number 
   return Math.max(0, value);
 }
 
-/* -------------------------------------------------------------------------- */
-/* 工厂                                                                        */
-/* -------------------------------------------------------------------------- */
+/* 工厂 */
 
 export function createSwapAnimation(options: SwapAnimationOptions = {}): SwapAnimation {
   const doc = resolveDocument(options.container);
@@ -249,7 +219,6 @@ export function createSwapAnimation(options: SwapAnimationOptions = {}): SwapAni
     pendingRemoval.set(el, timerId);
   }
 
-  /** 立即移除（不做淡出）——替换、dispose 时用。 */
   function removeNow(el: Element | null): void {
     if (!el) return;
     const timerId = pendingRemoval.get(el);
@@ -304,8 +273,6 @@ export function createSwapAnimation(options: SwapAnimationOptions = {}): SwapAni
     return { x: x - rect.left, y: y - rect.top };
   }
 
-  /* -------------------------------- 脉冲圆环 ------------------------------ */
-
   function createPulseRing(document: Document, x: number, y: number): SVGSVGElement {
     const svg = document.createElementNS(SVG_NS, 'svg');
     svg.setAttribute('class', PULSE_CLASS);
@@ -335,8 +302,6 @@ export function createSwapAnimation(options: SwapAnimationOptions = {}): SwapAni
     requestRemoval(svg, durationMs + 200);
   }
 
-  /* --------------------------------- 芯片 -------------------------------- */
-
   function createChip(text: string, x: number, y: number): HTMLDivElement | null {
     if (doc === null) return null;
     const chip = doc.createElement('div');
@@ -348,11 +313,7 @@ export function createSwapAnimation(options: SwapAnimationOptions = {}): SwapAni
     return chip;
   }
 
-  /**
-   * 先摆好起点、等浏览器绘制两帧、再交给 flyIn。
-   * 两帧是必要的：rAF 回调发生在**绘制之前**，只等一帧的话起点与 flyIn 的首帧会被合并，
-   * 观感上芯片"从终点开始"。
-   */
+  /** 先摆起点、等两帧再交给 flyIn：rAF 回调发生在绘制之前，只等一帧会让起点与首帧合并，观感上芯片"从终点开始"。 */
   function afterPaint(fn: () => void): void {
     if (raf === null) {
       fn();
@@ -371,7 +332,6 @@ export function createSwapAnimation(options: SwapAnimationOptions = {}): SwapAni
     frames.add(id);
   }
 
-  /** 单个芯片的行程：起点 → 终点（复用 flyIn 的 transform + rAF）。 */
   function flyChip(
     chip: HTMLDivElement,
     from: { x: number; y: number },
@@ -391,7 +351,6 @@ export function createSwapAnimation(options: SwapAnimationOptions = {}): SwapAni
         frameId = null;
         cancelTimer(fallbackTimer);
         fallbackTimer = null;
-        // 收尾必须在 dispose 之前就登记好，保证 dispose 之后仍有确定的终态。
         if (!chip.isConnected) {
           // 已经被移除（dispose / 提前清理）：不碰 DOM，但 promise 必须 settle。
           resolve();
@@ -481,8 +440,7 @@ export function createSwapAnimation(options: SwapAnimationOptions = {}): SwapAni
         });
       }
 
-      // 起点态：真实位置 = 各自的起点，视觉上却要"从终点被拉回来"
-      // （transition 常驻 none，见 BASE_CSS 的说明：位移只允许 rAF 驱动）
+      // 起点态：真实几何位置 = 起点，视觉上"从终点被拉回来"（transition 常驻 none，位移只由 rAF 驱动）。
       chipA.style.transform = `translate3d(${fromA.x.toFixed(1)}px, ${fromA.y.toFixed(1)}px, 0)`;
       chipB.style.transform = `translate3d(${fromB.x.toFixed(1)}px, ${fromB.y.toFixed(1)}px, 0)`;
 
@@ -580,19 +538,17 @@ export function createSwapAnimation(options: SwapAnimationOptions = {}): SwapAni
       if (disposed) return;
       disposed = true;
 
-      // 1) 取消所有挂起帧
       frames.forEach((id) => {
         if (caf !== null) caf(id);
       });
       frames.clear();
       ghostRafId = null;
 
-      // 2) 清掉所有计时器
       timers.forEach((id) => globalThis.clearTimeout(id));
       timers.clear();
       pendingRemoval.clear();
 
-      // 3) 让所有未 settle 的动画 promise 立刻 settle（resolver 内部各自做 isConnected 守卫）
+      // 未 settle 的动画 promise 必须立刻 settle（各 resolver 内部有 isConnected 守卫）
       const settles = Array.from(pendingSettles);
       pendingSettles.clear();
       settles.forEach((settle) => {
@@ -603,7 +559,7 @@ export function createSwapAnimation(options: SwapAnimationOptions = {}): SwapAni
         }
       });
 
-      // 4) 移除全部临时节点（含未登记在册的漏网节点：层被整体摘掉）
+      // 4) 移除全部临时节点（含未登记的漏网节点：整层直接摘掉）
       ghost = null;
       chipsLayer = null;
       const layer = root;
@@ -614,8 +570,6 @@ export function createSwapAnimation(options: SwapAnimationOptions = {}): SwapAni
       }
     },
   };
-
-  /* ------------------------------ 内部实现细节 ---------------------------- */
 
   function applyGhostTransform(): void {
     if (ghost === null) return;

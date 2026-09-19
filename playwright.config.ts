@@ -36,13 +36,9 @@ const SENSITIVE = [
 /**
  * **单独一个进程**跑的用例（不是"串行"能解决的）。
  *
- * 为什么必须独立进程（实测查出来的）：`hot-reload.spec.ts` 会**改写 `src/App.tsx`** 触发真实热更新，
- * 它和 `perf.spec.ts`（百万格）**同处一个 playwright 进程**时，用例全部通过、但**进程永远不退出**
- * （实测：各自单跑都秒退；`hot-reload + perf` 一起跑就挂住；`clipboard + date-cells` 这种组合正常）。
- * 二分过程见 `P3-内容锁定与工作区-交付说明.md` 的「修复 AA」。
- *
- * 所以这里是**三次独立调用**（`npm run e2e` = main → sensitive → hot-reload，各自一个新进程），
- * 而不是把它塞进某个项目里 —— 换项目也还在同一个进程里，解决不了。
+ * `hot-reload.spec.ts` 会**改写 `src/App.tsx`** 触发真实热更新；实测它与 `perf.spec.ts`（百万格）
+ * 同处一个 playwright 进程时，用例全部通过、但**进程永远不退出**（各自单跑都秒退；
+ * `clipboard + date-cells` 这种组合正常）。所以 `npm run e2e` 是三次独立调用，而不是换项目。
  */
 const HOT_RELOAD = ['**/hot-reload.spec.ts'];
 

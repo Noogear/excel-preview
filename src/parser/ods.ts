@@ -1,73 +1,39 @@
 /**
- * **OpenDocument Spreadsheet（`.ods`）** 解析器。
+ * **OpenDocument Spreadsheet（`.ods`）** 解析器：产出中性的 `WorkbookInput`（见
+ * `src/importer/synth-xlsx.ts`），再由 `writeWorkbookPackage` 打成规范 xlsx，于是预览/编辑/
+ * 工作区/撤销/导出/会话恢复全部复用既有链路。ODS 只是一条"入口翻译"，与 `csv.ts` 同构。
  *
- * 产出中性的 `WorkbookInput`（见 `src/importer/synth-xlsx.ts`），随后由 `writeWorkbookPackage`
- * 打成一份规范 xlsx，于是预览/编辑/工作区/撤销/导出/会话恢复全部复用既有链路——ODS 只是
- * 一条"入口翻译"，与 `csv.ts` 同构。
+ * 格式规范里的六个坑（都按真 Excel 产出的样本处理）：
+ *  1. **重复展开**：`number-columns-repeated` / `number-rows-repeated` 会把"右侧/下方补齐到整张表"
+ *     写成上万列的巨型元素。ODS 用"空行 + 重复"表达行间距，所以必须**截断而不是跳过**（跳过会让
+ *     后面的行坐标整体前移）；空重复最多推进 `MAX_EMPTY_ROW_RUN` / `MAX_EMPTY_COL_RUN` 步并记 warning。
+ *  2. **合并**：覆盖区域只由左上角的"声明者"产生，遍历时把光标推过被覆盖的格子并记进 `covered`；
+ *     绝不按 `table:covered-table-cell` 反推区域——它连盖了几格都不知道。
+ *  3. **公式**：ODS 用 OpenFormula（`of:=SUM([.A1:.A3])`）。只翻译 `of:` / `oooc:` 前缀且能逐 token
+ *     校验的引用与运算符；命名表达式、实现私有函数、`oooc:` 的正则与通配符扩展一律**丢公式、
+ *     留缓存值**并计入 `stats.formulaDropped`——宁可少一个公式也不能写错。
+ *  4. **日期与时间**：ODS 用 ISO 文本，必须换算成 Excel 序列号，否则单元格退化成文本、下游数字格式
+ *     失去意义；`PT36H0M0S` 这类超过 24 小时的时长按 1.5 天算，不能取模成 0.5。
+ *  5. **样式来源两处**：`content.xml` 的 `office:automatic-styles`（就近覆盖，优先）与 `styles.xml`
+ *     的 `office:styles`（命名样式 + 全部 `number:*` 定义）；`style:parent-style-name` 链要继承。
+ *  6. **列宽换算**：1 字符宽 = 0.2117cm（= 6pt = 8px@96dpi），见 `toCharWidth`。
  *
- * 工程上的六个坑（都按**真 Excel 产出的样本**处理，见 `tools/make-legacy-fixtures.ps1`）：
- *
- *  1. **重复展开**（`table:number-columns-repeated` / `table:number-rows-repeated`）：
- *     Excel 导出 ODS 时会把"右侧 / 下方补齐到整张表"的部分写成
- *     `<table:table-cell table:number-columns-repeated="16383"/>` 与
- *     `<table:table-row table:number-rows-repeated="1048555"><table:table-cell
- *     table:number-columns-repeated="16384"/></table:table-row>`，逐格展开就是几十亿个格子。
- *     策略是**截断而不是跳过**：ODS 用"空行 + 重复"表达行间距，直接丢掉会让后面的行
- *     （真夹具里第 20 行的 `行高48` 正是这种情形）坐标整体前移。所以空重复最多推进
- *     `MAX_EMPTY_ROW_RUN` / `MAX_EMPTY_COL_RUN` 步，被截掉的部分如实记进 `warnings`。
- *
- *  2. **合并**（`table:number-columns-spanned` / `table:number-rows-spanned`）：
- *     覆盖区域**只由左上角那个"声明者"产生**，遍历时把光标推过被覆盖的格子并把它们记进
- *     `covered` 集合。绝不按 `table:covered-table-cell` 反推区域——它只说明"这里被盖住了"，
- *     连盖了几个都不知道（真夹具里它是 `number-columns-repeated="5"` 的裸元素）。
- *
- *  3. **公式**：ODS 用 OpenFormula，`table:formula="of:=SUM([.A1:.A3])"`。只翻译
- *     `of:` / `oooc:` 前缀且**能逐 token 校验**的引用与运算符；任何看不懂的构造
- *     （命名表达式、实现私有函数、`oooc:` 的正则与通配符扩展…）一律**丢掉公式、保留缓存值**，
- *     并计入 `stats.formulaDropped`。宁可少一个公式，也不能把错的公式写进用户文件。
- *
- *  4. **日期与时间**：ODS 用 ISO 文本（`office:date-value="2025-01-01T00:00:00"`、
- *     `office:time-value="PT18H0M0S"`），Excel 用序列号。这里换算成序列号，否则单元格退化成
- *     文本、下游的数字格式也就失去意义。`PT36H0M0S` 这类**超过 24 小时**的时长同样按时长处理
- *     （1.5 天），不能取模成 0.5。
- *
- *  5. **样式来源两处**：`content.xml` 的 `office:automatic-styles`（Excel 给每个用到的样式写一条
- *     定义，**就近覆盖**）与 `styles.xml` 的 `office:styles`（命名样式 + 全部 `number:*` 数字格式
- *     定义）。同名以 `content.xml` 为准；`style:parent-style-name` 链要一路继承——真夹具里
- *     `ce1 → Default` 的字体与字号就来自父样式，不继承就会丢掉整张表的默认字体。
- *
- *  6. **列宽换算**：ODS 存绝对长度（`style:column-width="3.81cm"`），Excel 存字符宽度。
- *     系数由真夹具**反解**得到：xlsx 的 `width="18"`（Excel 字符宽度）导出成 ODS 后是 `3.81cm`，
- *     反解 1 字符宽 = 0.2117cm = 6pt = 8px(96dpi)。用同一系数验其余各列
- *     （14→2.9633、22→4.6567、30→6.35、9→1.905、20→4.2333、16→3.3867、12→2.54cm）全部吻合到
- *     1e-4cm，故取 `chars = cm / 0.2117`。往返误差只有 0.02 字符宽，来源是 Excel 自己导出时
- *     把长度值量化到了 0.01cm 量级。
- *
- * 明确不支持（如实丢弃 + 记 warning，绝不猜值）：条件格式（`style:map`）、数据验证
- * （`table:content-validation`）、批注（`office:annotation`）、超链接 URL（`text:a`，
- * 文本本身保留）、图片与图形（`draw:frame`）、命名区域、透视表、隐藏行的隐藏状态
- * （中性模型只有行高与列宽，没有"隐藏行"字段）、`table:table-header-columns` 的冻结列语义。
+ * 明确不支持（如实丢弃 + 记 warning，绝不猜值）：条件格式（`style:map`）、数据验证、批注、超链接 URL
+ * （文本本身保留）、图片与图形、命名区域、透视表、隐藏行的隐藏状态、`table:table-header-columns` 的冻结列语义。
  */
 import { childElements, findFirstElement, localName, nameMatches } from './xml';
 import { readText, readZipEntries, type ZipEntries } from './zip';
 import type { ElementRange, XmlAttributes } from './xml';
 import type { SynthCell, SynthSheet, SynthStyle, WorkbookInput } from '../importer/synth-xlsx';
 
-/* -------------------------------------------------------------------------- */
 /* 公开常量与结果类型                                                           */
-/* -------------------------------------------------------------------------- */
 
 /** 单次导入的单元格总量上限（与 `csv.ts` 的 `MAX_DELIMITED_CELLS` 同量级、同语义） */
 export const MAX_ODS_CELLS = 200_000;
 /** 单边上限（与 xlsx 规范一致） */
 export const MAX_ODS_ROWS = 1_048_576;
 export const MAX_ODS_COLS = 16_384;
-/**
- * 连续空列 / 空行的展开上限。
- *
- * 取的就是 ODS 文本在 Excel 里的自然边界（补齐写法是 16384 列 / 16384 行），于是真文件里的
- * 补齐能**完整且忠实地**展开，而损坏或恶意文件最多也只多走 16384 步。
- */
+/** 连续空列 / 空行的展开上限：16384 就是 ODS 在 Excel 里的自然补齐边界，真文件能完整展开，损坏文件最多多走 16384 步 */
 export const MAX_EMPTY_COL_RUN = 16_384;
 export const MAX_EMPTY_ROW_RUN = 16_384;
 /** 单个 `number-*-repeated` 属性的硬上限（防属性里塞天文数字） */
@@ -93,9 +59,8 @@ export interface OdsStats {
   /** 因无法可靠翻译而"丢公式留值"的个数 */
   formulaDropped: number;
   merges: number;
-  /** 被安全阀截断的次数（列重复 + 行重复 + 单元格总量） */
+  /** 被安全阀截断的次数（列重复 + 行重复 + 单元格总量）；`truncated` 表示是否发生过任何截断 */
   truncatedRepeats: number;
-  /** 是否发生了任何截断 */
   truncated: boolean;
 }
 
@@ -106,16 +71,9 @@ export interface OdsParseResult {
   stats: OdsStats;
 }
 
-/* -------------------------------------------------------------------------- */
 /* 主入口                                                                      */
-/* -------------------------------------------------------------------------- */
 
-/**
- * 解析 `.ods` 字节，返回中性工作簿 + 降级报告。
- *
- * 不抛异常：不是 zip、缺 `content.xml`、XML 结构怪异……都退化成"空工作簿 + warning"，
- * 与 `parseXlsx` 的容错原则一致（局部坏掉不该让整次导入失败）。
- */
+/** 解析 `.ods` 字节，返回中性工作簿 + 降级报告。不抛异常：不是 zip、缺 `content.xml`、结构怪异都退化成"空工作簿 + warning"（局部坏掉不该让整次导入失败） */
 export function parseOdsResult(bytes: Uint8Array): OdsParseResult {
   const warnings: string[] = [];
   const stats: OdsStats = {
@@ -148,17 +106,12 @@ export function parseOdsResult(bytes: Uint8Array): OdsParseResult {
   return { input: { sheets, styles: styles.synthStyles() }, warnings, stats };
 }
 
-/**
- * 主入口（固定签名）：字节 → 中性工作簿。
- * 需要降级报告或统计时用 `parseOdsResult`，两者的 `input` 完全一致。
- */
+/** 主入口（固定签名）。需要降级报告或统计时用 `parseOdsResult`，两者的 `input` 完全一致 */
 export function parseOds(bytes: Uint8Array): WorkbookInput {
   return parseOdsResult(bytes).input;
 }
 
-/* -------------------------------------------------------------------------- */
 /* 表格遍历                                                                     */
-/* -------------------------------------------------------------------------- */
 
 /** 找到 `office:body/office:spreadsheet`；缺任一环返回 undefined，由调用方记 warning */
 function findSpreadsheet(contentXml: string): ElementRange | undefined {
@@ -235,13 +188,8 @@ function parseTable(
   const tableProps = styles.resolveTableProps(tableEl.attrs['table:style-name']);
   const cells: SynthCell[] = [];
   const merges: string[] = [];
-  /**
-   * 列宽先按 `table:table-column` 的声明收集，**等行都解析完**再按实际用到的列裁剪。
-   *
-   * 为什么必须裁：ODS 把"整表补齐"的列也写成一条 `number-columns-repeated="16376"` 的列定义，
-   * 按声明落进 `colWidths` 就会输出 16384 条列宽（真夹具实测），而下游 writer 会把它变成
-   * 16384 个 `<col>` 元素。裁剪到"有内容的最后一列"才是用户能看见的那几列。
-   */
+  /** 列宽先按 `table:table-column` 声明收集，**行都解析完**再裁到"有内容的最后一列"：ODS 把整表补齐
+   * 也写成一条 `number-columns-repeated="16376"` 的列定义，全收会输出 16384 条列宽（下游 writer 变成 16384 个 `<col>`） */
   const pendingColWidths = new Map<number, number>();
   const rowHeights: Record<number, number> = {};
   /** 被合并覆盖的绝对坐标（`行 * MAX_ODS_COLS + 列`）；跨行合并会覆盖多行，所以是表级集合 */
@@ -290,9 +238,8 @@ function parseTable(
 
       const hasContent = parsed.cells.length > 0 || parsed.merges.length > 0;
       if (!hasContent && rowProps.hidden !== true) {
-        // 纯空行：只推进光标（见文件头第 1 条：空行承载"行间距"语义，不能直接丢）。
-        // 注意这里**不看行高**：空行上的行高是 Excel 补齐时写的默认值，照收会让
-        // `rowHeights` 从"用户设过的 4 行"膨胀成"几万行全有行高"。
+        // 纯空行：只推进光标（空行承载"行间距"语义，不能直接丢）。不看行高：空行上的行高是
+        // Excel 补齐时写的默认值，照收会让 `rowHeights` 从"用户设过的几行"膨胀成几万行。
         const advance = Math.min(repeat, MAX_EMPTY_ROW_RUN);
         if (advance < repeat) {
           clampedEmptyRows += repeat - advance;
@@ -371,9 +318,7 @@ function parseTable(
   return sheet;
 }
 
-/* -------------------------------------------------------------------------- */
 /* 列                                                                          */
-/* -------------------------------------------------------------------------- */
 
 interface ColumnResult {
   cursor: number;
@@ -383,12 +328,9 @@ interface ColumnResult {
   hidden: number;
 }
 
-/**
- * 一个 `table:table-column`：展开 `number-columns-repeated`，把宽度写进 `colWidths`。
- *
+/** 一个 `table:table-column`：展开 `number-columns-repeated`，把宽度写进 `colWidths`。
  * 样式里没有列宽时（例如整表补齐用的裸列）**留空**，让下游用默认列宽——把默认值当"用户设过的
- * 宽度"写出去，Excel 里每一列都会变成"自定义宽度"，用户再也点不回"自动"。
- */
+ * 宽度"写出去，Excel 里每一列都会变成"自定义宽度"，用户再也点不回"自动"。 */
 function applyColumn(
   colEl: ElementRange,
   styles: StyleResolver,
@@ -412,9 +354,7 @@ function applyColumn(
   return { cursor: cursor + count, clamped: repeat - count, hidden: hidden ? count : 0 };
 }
 
-/* -------------------------------------------------------------------------- */
 /* 行与单元格                                                                   */
-/* -------------------------------------------------------------------------- */
 
 function parseRow(
   contentXml: string,
@@ -441,9 +381,8 @@ function parseRow(
     const span = isCell ? cellSpans(cellEl.attrs) : { colSpan: 1, rowSpan: 1 };
 
     if (isCovered) {
-      // 被覆盖的位置不是内容；只有**带位置语义样式**的 covered 格子才占位（那代表用户设过底色
-      // 或对齐）。裸的 `<table:covered-table-cell table:number-columns-repeated="16383"/>`
-      // 与只带默认字体的占位符一律跳过，否则一处合并就会造出上万个空单元格。
+      // 只有**带位置语义样式**的 covered 格子才占位（代表用户设过底色或对齐）；裸的
+      // `<table:covered-table-cell number-columns-repeated="16383"/>` 与纯默认字体的占位符一律跳过。
       const styleRef = styles.internCell(cellEl.attrs['table:style-name']);
       const count = Math.min(repeat, Math.max(0, MAX_ODS_COLS - column));
       if (styleRef.visual) {
@@ -504,22 +443,11 @@ function parseRow(
   return { cells, merges, maxCol, truncated };
 }
 
-/**
- * 这个 `table:table-cell` 是不是一个"纯占位空格子"。
- *
- * ODS（Excel 导出尤其明显）会给每一行的尾部补齐
- * `<table:table-cell table:number-columns-repeated="16383"/>`，也会在正文左侧写
- * `<table:table-cell table:number-columns-repeated="3" table:style-name="ce1"/>` 这种跳格占位符。
- * 把它们当单元格收下，真夹具里 30 个真值格子会膨胀成 59 个"空但带默认样式"的假格子（实测），
- * 预览里就多出一片本来不存在的格子。
- *
- * 判据分两种：
- *  ① 完全没有样式引用 → 一定是占位；
- *  ② 样式只描述了"字体"，**没有任何位置语义**（无填充、无对齐、无边框、无格式）→ 也是占位。
- *     这一条是关键：ODS 里每个格子都会带一个继承自 `Default` 的 `ce1`（字体 宋体 11pt），
- *     光看"有没有样式"判不出来。而带填充 / 对齐的空格子是用户真的设过底色或居中，
- *     必须保留——真夹具 `fixture-rules` 的 C1 就是这种。
- */
+/** 这个 `table:table-cell` 是不是"纯占位空格子"：ODS（Excel 导出尤其明显）会给每行尾部补齐
+ * `number-columns-repeated="16383"` 的裸格子，全收下来真夹具里 30 个真值格子会膨胀成 59 个假格子。
+ * 判据是"没有样式引用"或"样式只有字体、无任何位置语义（填充/对齐/边框/数字格式）"——后者是关键，
+ * 因为每个格子都带继承自 `Default` 的 `ce1`（宋体 11pt），光看有无样式判不出来；带填充/对齐的空格子
+ * 是用户真设过的，必须保留。 */
 /** 这些属性的出现说明"这个格子有值"，它就不是占位符 */
 const VALUE_ATTRS = [
   'office:value', 'office:boolean-value', 'office:date-value', 'office:time-value',
@@ -538,12 +466,8 @@ function isEmptyPlaceholder(
   return !styleRef.visual;
 }
 
-/**
- * 读一个 `table:table-cell`：值、公式、样式。
- *
- * 值优先信 `office:value*` 属性（那是规范里的权威值），属性缺失时退回 `<text:p>` 文本——
- * 手工写的 ODS 常常只写文本、不写 `office:value-type`。
- */
+/** 读一个 `table:table-cell`：值、公式、样式。值优先信 `office:value*` 属性（规范里的权威值），
+ * 属性缺失时退回 `<text:p>` 文本——手工写的 ODS 常常只写文本、不写 `office:value-type`。 */
 function readCell(
   contentXml: string,
   cellEl: ElementRange,
@@ -609,39 +533,24 @@ function readCell(
   return cell;
 }
 
-/* -------------------------------------------------------------------------- */
 /* 单元格文本                                                                   */
-/* -------------------------------------------------------------------------- */
 
-/**
- * 取单元格的可见文本：拼接所有 `<text:p>`（段间换行），展开 `<text:s text:c="3"/>`、
- * `<text:tab/>`、`<text:line-break/>`，保留 `<text:span>` / `<text:a>` 里的文字。
- *
- * 为什么自己扫一遍而不复用 `elementText`：ODS 的空白语义全在这些自闭合元素上，
- * `elementText` 会把它们剥成空串（`<text:s/>` 一个空格就没了），真夹具里
- * "粗蓝 + 斜体 + 下划线绿" 会粘成 "粗蓝+ 斜体+ 下划线绿"。所以这里按标签逐段取，
- * 并**跳过元素之间的排版空白**（缩进换行），只保留元素内部的文本。
- */
+/** 取单元格的可见文本：拼接所有 `<text:p>`（段间换行），展开 `<text:s text:c="3"/>`、`<text:tab/>`、
+ * `<text:line-break/>`，保留 `<text:span>` / `<text:a>` 里的文字。不能复用 `elementText`：ODS 的空白
+ * 语义全在这些自闭合元素上，它会把 `<text:s/>` 剥掉、让 "粗蓝 + 斜体" 粘成一个词；这里按标签逐段取，
+ * 并跳过元素之间的排版空白（缩进换行）。 */
 export function readCellText(contentXml: string, cellEl: ElementRange): string {
   if (cellEl.selfClosing) return '';
   const start = cellEl.openEnd;
   const end = Math.max(cellEl.openEnd, cellEl.closeEnd);
-  /**
-   * 段落文本按"最外层 `<text:p>`"分段收集，最后用换行拼起来。
-   *
-   * 为什么不边扫边补换行：`<text:p>` 是可以嵌套的（列表项、`<text:list>`），
-   * 靠"上一个标签是不是 `</text:p>`"来判断段界会在嵌套时多补或漏补换行。
-   * 按深度归段是纯局部的：深度从 0 变 1 开一段，回到 0 收一段。
-   */
+  /** 段文本按"最外层 `<text:p>`"归段：`<text:p>` 可以嵌套（列表项），靠"上一个标签是不是
+   * `</text:p>`"判段界会在嵌套时多补或漏补换行；按深度归段（0→1 开一段，回到 0 收一段）是纯局部的。 */
   const paragraphs: string[] = [];
   let current = '';
   /** `<text:p>` 的嵌套深度（> 0 表示正在收集属于单元格的段落文本） */
   let paragraphDepth = 0;
-  /**
-   * 遮挡容器的嵌套深度（`<office:annotation>`、`<draw:frame>`、`<svg:desc>` …）。
-   * 这些容器内部也有 `<text:p>`，但那是批注 / 图形说明，不是单元格的值——真夹具里一条两行的
-   * 批注会被拼成 "这是一条批注（legacy note）第二行带批注的单元格" 这种把批注和正文粘起来的假值。
-   */
+  /** 遮挡容器（`<office:annotation>`、`<draw:frame>`、`<svg:desc>` …）的嵌套深度：它们内部的
+   * `<text:p>` 是批注 / 图形说明，拼进来会造出"批注 + 正文"粘在一起的假值。 */
   let blockDepth = 0;
   let i = start;
   let textStart = start;
@@ -709,8 +618,7 @@ export function readCellText(contentXml: string, cellEl: ElementRange): string {
   flush(end);
   paragraphs.push(current);
 
-  // 只裁每一段首尾的**普通空白**：那是 XML 缩进。用户真正想要的空格由 `<text:s/>` 表达，
-  // 而它展开后同样落在段内（甚至段首），所以不能对整串做 trim，否则会吃掉用户的前导空格。
+  // 只裁每段首尾的普通空白（XML 缩进）：用户要的空格由 `<text:s/>` 表达、展开后也落在段首，对整串 trim 会吃掉它
   const trimmed = paragraphs
     .map((part) => part.replace(/^[ \t]+/, '').replace(/[ \t\n]+$/, ''))
     .filter((part) => part !== '');
@@ -718,10 +626,7 @@ export function readCellText(contentXml: string, cellEl: ElementRange): string {
   return joined.length > MAX_TEXT_LENGTH ? joined.slice(0, MAX_TEXT_LENGTH) : joined;
 }
 
-/**
- * 不算单元格值的块级容器：它们内部也有 `<text:p>`，但那是批注 / 图形说明 / 索引，
- * 拼进来会造出"批注 + 正文"粘在一起的假值（真夹具验证过）。
- */
+/** 不算单元格值的块级容器：内部的 `<text:p>` 是批注 / 图形说明 / 索引，拼进来会造出"批注 + 正文"粘在一起的假值 */
 const BLOCK_CONTAINERS: ReadonlySet<string> = new Set([
   'annotation', 'frame', 'desc', 'title', 'note', 'index-body', 'ruby',
 ]);
@@ -797,9 +702,7 @@ function parseTagAttrs(xml: string, start: number, end: number): XmlAttributes {
   return attrs;
 }
 
-/* -------------------------------------------------------------------------- */
 /* 值换算                                                                       */
-/* -------------------------------------------------------------------------- */
 
 function numberFrom(raw: string | undefined): number | undefined {
   if (raw === undefined) return undefined;
@@ -818,13 +721,9 @@ function booleanFrom(raw: string | undefined): boolean | undefined {
   return undefined;
 }
 
-/**
- * ISO 日期（`2025-01-01` / `2025-01-01T12:00:00`，可带小数秒）→ Excel 序列号。
- *
- * 基准取 1899-12-30（Excel 的 1900 闰年 bug 之后一天），于是 1900-03-01 起的日期与 Excel
- * 完全一致——Excel 自己导出的 ODS 不会早于 1900，这个基准足够且可测。
- * 时间部分按 UTC 解析：ODS 的 `date-value` 是不带偏移的本地时间，UTC 解析等于原样取用。
- */
+/** ISO 日期（`2025-01-01` / `2025-01-01T12:00:00`，可带小数秒）→ Excel 序列号。基准取
+ * 1899-12-30（Excel 1900 闰年 bug 之后一天），1900-03-01 起与 Excel 完全一致；时间部分按 UTC
+ * 解析——ODS 的 `date-value` 是不带偏移的本地时间，UTC 解析等于原样取用。 */
 export function serialFromDateText(text: string): number | undefined {
   const m = /^(-?\d{4,})-(\d{1,2})-(\d{1,2})(?:[T ](\d{1,2}):(\d{1,2})(?::(\d{1,2}(?:\.\d+)?))?)?/.exec(text.trim());
   if (!m) return undefined;
@@ -842,11 +741,8 @@ export function serialFromDateText(text: string): number | undefined {
   return Math.round((days + fraction) * 1e6) / 1e6;
 }
 
-/**
- * ISO 8601 时长（`PT18H0M0S`）→ 天（Excel 的时间值）。
- * `PT36H0M0S` 是 1.5 天而不是 0.5 天：ODS 的时长允许超过 24 小时，Excel 的 `[h]:mm:ss`
- * 也这么用，取模会把"36 小时"变成"12 小时"。
- */
+/** ISO 8601 时长（`PT18H0M0S`）→ 天（Excel 的时间值）。`PT36H0M0S` 是 1.5 天而不是 0.5 天：
+ * ODS 的时长允许超过 24 小时，取模会把"36 小时"变成"12 小时"。 */
 export function daysFromDuration(text: string): number | undefined {
   const m = /^(-)?P(?:(\d+(?:\.\d+)?)D)?(?:T(?:(\d+(?:\.\d+)?)H)?(?:(\d+(?:\.\d+)?)M)?(?:(\d+(?:\.\d+)?)S)?)?$/.exec(text.trim());
   if (!m) return undefined;
@@ -859,27 +755,18 @@ export function daysFromDuration(text: string): number | undefined {
   return Math.round(sign * total * 1e6) / 1e6;
 }
 
-/* -------------------------------------------------------------------------- */
 /* 公式：OpenFormula → Excel A1 公式                                            */
-/* -------------------------------------------------------------------------- */
 
 /** 明确拒绝的函数名：OpenFormula 独有、实现私有、或与 Excel 同名函数的语义不同 */
 const FORBIDDEN_FUNCTIONS: ReadonlySet<string> = new Set([
   'REGEX', 'DDE', 'BAHTTEXT', 'MULTIPLE.OPERATIONS', 'COM.MICROSOFT.EXCEL',
 ]);
 
-/**
- * 把 `table:formula` 的 OpenFormula 表达式翻成 Excel 的 A1 公式（**不含前导 `=`**）；
- * 无法可靠翻译时返回 `undefined`（调用方丢掉公式、保留缓存值）。
- *
- * 翻译规则（逐 token，不做正则整体替换）：
- *  - 引用 `[.A1]` / `[.A1:.A3]` / `[第二张.A2]` / `['我的 表'.A1]` → `A1` / `A1:A3` / `第二张!A2`；
- *  - 参数分隔 `;` → `,`（真夹具里 `IF([.A2]>50;"大";"小")` 就走这条）；
- *  - `&`（拼接）、`+ - * / ^ = <> <= >= < > ( )` 两边语义一致，原样输出；
- *  - 引号字符串原样保留（两边都用 `"` 且都用 `""` 转义）；
- *  - 出现 `!`（OpenFormula 的"不等于"）、`|`（联合）、`~`（通配符）、`{}`（数组）、
- *    含 `.` 或形如单元格引用的裸标识符（命名表达式）一律判定为不可翻译。
- */
+/** 把 `table:formula` 的 OpenFormula 表达式翻成 Excel 的 A1 公式（**不含前导 `=`**）；无法可靠
+ * 翻译时返回 `undefined`（调用方丢掉公式、保留缓存值）。逐 token 翻译，不做正则整体替换：
+ * 引用 `[.A1]` / `[.A1:.A3]` / `[第二张.A2]` / `['我的 表'.A1]` → `A1` / `A1:A3` / `第二张!A2`；
+ * 参数分隔 `;` → `,`；`&` 与 `+ - * / ^ = <> <= >= < > ( )` 两边语义一致、原样输出；引号串原样保留。
+ * 出现 `!`（OpenFormula 的"不等于"）、`|`（联合）、`~`（通配符）、`{}`（数组）或命名表达式一律拒绝。 */
 export function odsFormulaToA1(formula: string): string | undefined {
   let text = formula.trim();
   const colon = text.indexOf(':');
@@ -967,18 +854,13 @@ export function odsFormulaToA1(formula: string): string | undefined {
 interface SingleRef {
   /** Excel 写法（跨表已带 `表名!` 前缀） */
   text: string;
-  /** 表名 + `!`（必要时带单引号） */
+  /** 表名 + `!`（必要时带单引号），以及表名原文（用于校验范围两端一致） */
   sheetPrefix?: string;
-  /** 表名原文，用于校验范围两端一致 */
   sheet?: string;
 }
 
-/**
- * 方括号里的引用 → A1 记号（跨表用 Excel 的 `!`）。
- *
- * 支持 `.A1`、`.A1:.A3`、`.$A$1:.$B$2`、`第二张.A1`、`'我的 表'.A1`、`.A:A`、`.1:3`；
- * 命名表达式（`[销售额]`）返回 undefined，由调用方判定为不可翻译。
- */
+/** 方括号里的引用 → A1 记号（跨表用 Excel 的 `!`）。支持 `.A1`、`.A1:.A3`、`.$A$1:.$B$2`、
+ * `第二张.A1`、`'我的 表'.A1`、`.A:A`、`.1:3`；命名表达式（`[销售额]`）返回 undefined。 */
 function bracketRefToA1(raw: string): string | undefined {
   const body = raw.trim();
   if (body === '') return undefined;
@@ -1028,9 +910,7 @@ function singleRef(raw: string): SingleRef | undefined {
   return { text: `${prefix}!${text}`, sheetPrefix: `${prefix}!`, sheet };
 }
 
-/* -------------------------------------------------------------------------- */
 /* 样式                                                                        */
-/* -------------------------------------------------------------------------- */
 
 interface RawStyle {
   styleAttrs: XmlAttributes;
@@ -1065,18 +945,11 @@ const BORDER_STYLE_MAP: Readonly<Record<string, string>> = {
   outset: 'thin',
 };
 
-/**
- * 样式解析：把 ODS 的"样式名 → 属性链"变成中性的 `SynthStyle`。
- *
- * 三条关键约定：
- *  - **就近覆盖**：同名样式在 `content.xml` 与 `styles.xml` 都有定义时用 `content.xml` 的
- *    （ODS 的 `office:automatic-styles` 描述"这份文档实际用的样式"，优先级更高）；
- *    同一份文档里后出现的覆盖先出现的。
- *  - **继承**：`style:parent-style-name` 链从根到叶逐层覆盖；不继承会丢掉整张表的默认字体
- *    （真夹具里 `ce1` 自己不写字体，全靠父样式 `Default`）。
- *  - **去重**：解析结果按 JSON 串 intern，`SynthCell.style` 只存下标，
- *    上万个同款单元格共用一条样式，样式表不会膨胀。
- */
+/** 样式解析：把 ODS 的"样式名 → 属性链"变成中性的 `SynthStyle`。三条关键约定：
+ *  - **就近覆盖**：同名样式以 `content.xml` 的 `office:automatic-styles` 为准（它描述"这份文档实际
+ *    用的样式"，优先级更高），同一份文档内后出现的覆盖先出现的。
+ *  - **继承**：`style:parent-style-name` 链从根到叶逐层覆盖；不继承会丢掉整张表的默认字体。
+ *  - **去重**：解析结果按 JSON 串 intern，`SynthCell.style` 只存下标，上万同款单元格共用一条。 */
 class StyleResolver {
   private readonly raw = new Map<string, RawStyle>();
   /** 样式名的来源：content 优先于 styles */
@@ -1185,14 +1058,9 @@ class StyleResolver {
     return out;
   }
 
-  /**
-   * 行属性：**只有显式自定义行高才保留**。
-   *
-   * 为什么看 `style:use-optimal-row-height`：ODS 里每一行都会带一条行高（哪怕是自动算出来的
-   * 13.5pt）。把它们全当成"用户设过的行高"写回 xlsx，每一行都会变成 `customHeight="1"`，
-   * 用户在 Excel 里再也点不回"自动调整行高"。真夹具验证：`use-optimal-row-height="false"`
-   * 的 4 行恰好就是 xlsx 真值里有 `ht` 的 4 行（32 / 44 / 30 / 48）。
-   */
+  /** 行属性：**只有显式自定义行高才保留**（判据是 `style:use-optimal-row-height="false"`）。
+   * ODS 里每行都会带一条行高（哪怕是自动算出的 13.5pt），全收写回 xlsx 会让每行都成
+   * `customHeight="1"`，用户再也点不回"自动调整行高"。 */
   resolveRowProps(name: string | undefined): { height?: number; hidden?: boolean } {
     const props = this.walk(name)?.rowProps ?? {};
     const out: { height?: number; hidden?: boolean } = {};
@@ -1213,13 +1081,9 @@ class StyleResolver {
     return out;
   }
 
-  /**
-   * 把一个 `table:style-name` 解析成 `SynthStyle` 下标；没有任何可表达样式时 `index = -1`。
-   * 返回 `-1` 让调用方**不写** `SynthCell.style`，于是空格子不会被造出来、默认样式不会被写出去。
-   *
-   * `visual` 表示这条样式是否带"位置语义"（填充 / 对齐 / 边框 / 旋转 / 数字格式）。
-   * 只带字体的样式等价于 ODS 的默认单元格样式，`parseRow` 靠它区分"真格子"与"跳格占位符"。
-   */
+  /** 把一个 `table:style-name` 解析成 `SynthStyle` 下标；无任何可表达样式时返回 `-1`，让调用方
+   * **不写** `SynthCell.style`（空格子不会被造出来、默认样式不会被写出去）。`visual` 表示是否带
+   * "位置语义"（填充/对齐/边框/旋转/数字格式）：`parseRow` 靠它区分"真格子"与"跳格占位符"。 */
   internCell(name: string | undefined): { index: number; visual: boolean } {
     const raw = this.walk(name);
     if (!raw) return { index: -1, visual: false };
@@ -1306,17 +1170,11 @@ class StyleResolver {
   }
 }
 
-/* -------------------------------------------------------------------------- */
 /* 数字格式                                                                    */
-/* -------------------------------------------------------------------------- */
 
-/**
- * `number:*` 定义 → Excel 格式串；结构对不上就返回 undefined（调用方留空，不瞎编）。
- *
- * 已知取舍：`style:map`（ODS 用数据格式做条件分支，例如"负值套另一个样式"）**不翻译**——
- * Excel 的分节格式串要求三节分别是正/负/零，而 `style:map` 可以按任意条件跳转，
- * 硬凑出来的串会让用户看到与源文件不同的数字。这类单元格只丢格式、值照旧。
- */
+/** `number:*` 定义 → Excel 格式串；结构对不上就返回 undefined（调用方留空，不瞎编）。
+ * `style:map`（ODS 用数据格式做条件分支）**不翻译**：Excel 的分节格式串要求三节是正/负/零，
+ * 而 `style:map` 可按任意条件跳转，硬凑会让用户看到与源文件不同的数字。这类只丢格式。 */
 function buildNumberFormat(entry: { xml: string; el: ElementRange } | undefined): string | undefined {
   if (!entry) return undefined;
   const { xml, el } = entry;
@@ -1375,8 +1233,7 @@ function buildNumberFormat(entry: { xml: string; el: ElementRange } | undefined)
       }
       case 'month': {
         sawNumber = true;
-        // ODS 的 `number:style` 在 month 上只有 textual（月份名）与否之分；
-        // `long` 只是"补零到两位"，对应 Excel 的 `mm`（真夹具 N49 验证）
+        // month 的 `number:style` 只有 textual（月份名）与否之分，`long` 只是补零到两位，对应 Excel 的 `mm`
         parts.push(child.attrs['number:style'] === 'textual' ? 'mmm' : 'mm');
         break;
       }
@@ -1457,9 +1314,7 @@ function elementText(xml: string, el: ElementRange): string {
   return decodeXmlEntities(inner.replace(/<[^>]*>/g, ''));
 }
 
-/* -------------------------------------------------------------------------- */
 /* 样式值换算                                                                   */
-/* -------------------------------------------------------------------------- */
 
 /** `#RRGGBB` / `#RGB` / `#AARRGGBB` → `#RRGGBB`；`transparent` 表示无填充 */
 function normalizeOdsColor(raw: string | undefined): string | undefined {
@@ -1502,12 +1357,8 @@ function mapVerticalAlign(raw: string): SynthStyle['verticalAlign'] {
   }
 }
 
-/**
- * `fo:border` / `fo:border-top` … → 中性边框。
- *
- * 简写 `fo:border` 的语义是"四边同一根线"，所以四边都要写上——只写一边的话，
- * 真夹具里 `fo:border="2pt solid #DC2626"` 的 medium 边框就只剩一条边。
- */
+/** `fo:border` / `fo:border-top` … → 中性边框。简写 `fo:border` 的语义是"四边同一根线"，
+ * 四边都要写上，只写一边的话 `fo:border="2pt solid #DC2626"` 的边框就只剩一条边。 */
 function readBorder(cell: XmlAttributes): SynthStyle['border'] | undefined {
   const shared = cell['fo:border'];
   const sides: Array<'top' | 'right' | 'bottom' | 'left'> = ['top', 'right', 'bottom', 'left'];
@@ -1555,8 +1406,7 @@ function parseBorderLine(raw: string | undefined): { style: string; color?: stri
   let style = BORDER_STYLE_MAP[styleName];
   if (style === undefined) return undefined;
   if (styleName === 'solid' && widthPt !== undefined) {
-    // solid 的粗细只能从线宽看出来。分档与真夹具对齐：0.5pt → thin（ODS 的 "thin solid"）、
-    // 2pt → medium（`fixture-styles` 的 ce8，xlsx 真值是 medium）、3pt 及以上 → thick。
+    // solid 的粗细只能从线宽看出来：≥2.5pt → thick，≥1pt → medium，0.5pt 的 "thin solid" → thin
     if (widthPt >= 2.5) style = 'thick';
     else if (widthPt >= 1) style = 'medium';
   }
@@ -1579,14 +1429,8 @@ function toPoints(raw: string | undefined): number | undefined {
   }
 }
 
-/**
- * 列宽：绝对长度 → Excel 字符宽度。
- *
- * 系数由真夹具**反解**：xlsx 真值里的 `width="18"`（Excel 字符宽度单位）导出成 ODS 后是
- * `3.81cm`，两者相除得 1 字符宽 = 0.211667cm；用同一系数验其余各列
- * （14→2.9633、22→4.6567、30→6.35、9→1.905、20→4.2333、16→3.3867、12→2.54）全部吻合，
- * 而这个系数正好等于 **0.2117cm ≈ 8px at 96dpi ≈ 6pt** —— 即 1 字符宽 = 6pt。
- */
+/** 列宽：绝对长度 → Excel 字符宽度。系数由真夹具反解：xlsx 的 `width="18"` 导出成 ODS 后是
+ * `3.81cm`，得 1 字符宽 = 0.2117cm ≈ 8px@96dpi = 6pt，用它验其余各列都吻合到 1e-4cm。 */
 function toCharWidth(raw: string | undefined): number | undefined {
   if (raw === undefined) return undefined;
   const m = /^(-?[\d.]+)\s*(cm|mm|in|pt|px)?$/.exec(raw.trim());
@@ -1617,9 +1461,7 @@ function firstDefined(...values: Array<string | undefined>): string | undefined 
   return undefined;
 }
 
-/* -------------------------------------------------------------------------- */
 /* 小工具                                                                      */
-/* -------------------------------------------------------------------------- */
 
 function cellSpans(attrs: XmlAttributes): { colSpan: number; rowSpan: number } {
   const colSpan = Math.trunc(Math.min(MAX_ODS_COLS, Math.max(1, numberFrom(attrs['table:number-columns-spanned']) ?? 1)));

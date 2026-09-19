@@ -1,15 +1,10 @@
 /**
- * 会话持久化（合并自原 persistence.spec.ts 的 5 条 + p3-persistence.spec.ts 的 1 条 → 3 条）。
+ * 会话持久化。
  *
  *   ① App 层全链路：导入 → 编辑 → 切换三种交互模式 → 放工作区条目 → 重开页面，
  *      标签/编辑/工作区/模式**都恢复**（三种模式值逐一验证，而不只验一种）
  *   ② 存储层真实 IndexedDB 往返：Uint8Array 逐字节一致、多标签/编辑/工作区原样带回来、clear() 归零
  *   ③ 坏数据（version 不符 / 结构损坏 / 非对象）→ load() 返回 null、物理清掉、绝不抛
- *
- * 已删除（属于实现细节或被 tests/unit 覆盖）：
- *   - "模块可由 dev server 直接加载"（只是 typeof 断言）
- *   - createAutoSaver 去抖/flush/串行（tests/unit/persistence.test.ts 用假定时器覆盖）
- *   - "两个库名互不干扰"（同一诉求已由 ② 的往返 + clear 覆盖）
  *
  * 注：① 是"同一 page 内 reload"（同一个 BrowserContext 才共享 IndexedDB）。
  */

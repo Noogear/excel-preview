@@ -1,5 +1,5 @@
 /**
- * 导入与保真（合并自原 import.spec.ts / p1-import-fidelity.spec.ts / p1-fidelity.spec.ts）。
+ * 导入与保真。
  *
  * 链路：真实 xlsx（tools/make-fixtures.mjs 生成）→ 自研 OOXML 解析器 → 适配层
  *       → Univer IWorkbookData → canvas 渲染。

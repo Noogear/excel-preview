@@ -38,7 +38,7 @@ export interface ParsedMerge { startRow: number; startCol: number; endRow: numbe
 export interface ParsedFreeze { row: number; col: number }
 
 /* ============================================================================
- * P1 扩展：条件格式 / 数据验证 / 超链接 / 批注 / 表格 / 图片
+ * 附属特性：条件格式 / 数据验证 / 超链接 / 批注 / 表格 / 图片
  * 字段名与 OOXML 一一对应，便于上层映射，也便于对外解释"哪些没还原"
  * ========================================================================== */
 
@@ -188,7 +188,7 @@ export interface ParsedSheet {
   gridlinesHidden?: boolean;
   defaultRowHeight?: number; defaultColWidth?: number;
   dimension?: { startRow: number; startCol: number; endRow: number; endCol: number };
-  /* ---- P1 扩展 ---- */
+  /* ---- 附属特性 ---- */
   conditionalFormats?: ConditionalFormatRule[];
   dataValidations?: DataValidationRule[];
   hyperlinks?: ParsedHyperlink[];

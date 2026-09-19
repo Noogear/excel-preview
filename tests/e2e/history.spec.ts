@@ -1,13 +1,11 @@
 /**
- * 撤销与历史（合并自原 p2-interaction.spec.ts 的撤销原子性 + p3-history.spec.ts）。
+ * 撤销与历史。
  *
  * 不变量：
  *   ① 一次互换 = **一次撤销**（两个格子一起还原，不允许只回退一半）
  *   ② 历史面板逐条入账，可回退到任意一步，也能前滚回最新
  *
- * 已删除："没有操作时显示空占位"（纯空态 UI，非关键不变量）。
- *
- * 注意口径（由历史面板定义）：面板第 index 项的 `data-testid="history-item-<index>"`，
+ * 口径（由历史面板定义）：面板第 index 项的 `data-testid="history-item-<index>"`，
  * 点击时回调收到的是**步下标** `index + 1`（0 = 最初状态，N = 全部已应用）。
  */
 import { expect, test } from '@playwright/test';
